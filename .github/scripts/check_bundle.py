@@ -54,7 +54,8 @@ def verify(root=ROOT):
         if err:
             problems.append(f"{name}: {err}")
             continue
-        want = corgi.hashes(tree / manifest.get(name, {}).get("path", f"mods/{name}"))
+        src = tree / manifest.get(name, {}).get("path", f"mods/{name}")
+        want = corgi.hashes(src, corgi.bundle_files(src, manifest.get(name, {})))  # what `corgi bundle` copies
         have = corgi.hashes(root / "mods" / name)
         have.pop("BUNDLED.md", None)
         at = rec.get("tag") or rec["sha"][:7]

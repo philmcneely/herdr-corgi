@@ -73,7 +73,10 @@ corgi bundle                            # copies each released mod into mods/<mo
 
 `bundle` takes each mod in `mods.json` (not corgi itself) at its latest `vX.Y.Z` tag, or the default branch with a
 warning, writes `mods/<mod>/BUNDLED.md` and `bundle.json` (`{mod: {repo, tag, sha}}`). CI's
-`.github/scripts/check_bundle.py` fails when a copy no longer matches its recorded tag. Edit the mod repos, then
+`.github/scripts/check_bundle.py` fails when a copy no longer matches its recorded tag. A mod's `corgi.json` can list
+files the bundle leaves out (`"bundle_exclude": ["test_smoke.mjs"]`): tests that read the mod's repo outside
+`mods/<mod>/`, which the bundle doesn't have. For a release made before the mod listed them, the same key in the
+mod's `mods.json` entry does it. Edit the mod repos, then
 re-bundle.
 
 `save` refuses a checkout with uncommitted changes and skips generated files (`gpui-kit.d.ts`, `jsconfig.json`)

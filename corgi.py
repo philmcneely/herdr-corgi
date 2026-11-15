@@ -68,12 +68,13 @@ def save_json(path, data):
 
 
 def load_manifest(path=None):
-    """mods.json: {"mods": {name: {"repo": url, "path": "mods/<name>", "default": bool}}}."""
+    """mods.json: {"mods": {name: {"repo": url, "path": "mods/<name>", "default": bool, "bundle_exclude": [files]}}}."""
     path = Path(path or os.environ.get("CORGI_MANIFEST") or HERE / "mods.json")
     data = load_json(path, None)
     if data is None:
         raise Fail(f"no manifest at {path}")
-    return {n: {"repo": e["repo"], "path": e.get("path", f"mods/{n}"), "default": e.get("default", True)}
+    return {n: {"repo": e["repo"], "path": e.get("path", f"mods/{n}"), "default": e.get("default", True),
+                "bundle_exclude": e.get("bundle_exclude") or []}
             for n, e in data["mods"].items()}
 
 
@@ -981,6 +982,14 @@ def bundle_ref(d):
     return (ref if ts else None), ref, git("-C", d, "rev-parse", f"{ref}^{{commit}}").strip()
 
 
+def bundle_files(src, entry):
+    """A mod's files for the bundle: all but "bundle_exclude", listed in its corgi.json or, for a release made before
+    the mod said so, in its mods.json entry. That is for tests that read the mod's repo outside mods/<mod>/ (demo
+    fixtures) and what only they import: the bundle has no such folder, so they could only fail here."""
+    skip = set(load_json(Path(src) / "corgi.json", {}).get("bundle_exclude") or []) | set(entry.get("bundle_exclude") or [])
+    return [rel for rel in list_files(src) if rel not in skip]
+
+
 def cmd_bundle(a):
     """Copies every mod in mods.json except corgi into <repo>/mods/<mod>/ at its latest tag and records
     where each came from in bundle.json. The mod repos stay the source; these copies are for herdr.dev."""
@@ -1003,7 +1012,7 @@ def cmd_bundle(a):
         if a.dry_run:
             continue
         shutil.rmtree(dest, ignore_errors=True)
-        for rel in list_files(src):
+        for rel in bundle_files(src, entry):
             (dest / rel).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src / rel, dest / rel)
         (dest / "BUNDLED.md").write_text(BUNDLED.format(url=url, ref=ref, sha=commit))

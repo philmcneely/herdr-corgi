@@ -822,6 +822,32 @@ class B5Bundle(Base):
         self.assertEqual(check_bundle.verify(out_dir), ["goto: main.js differs from v0.1.0",
                                                          "goto: extra.js is not in v0.1.0"])
 
+    def test_bundle_leaves_out_what_a_mod_or_the_manifest_excludes(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / ".github" / "scripts"))
+        import check_bundle
+        # A test that reads the repo outside mods/<mod>/ can only fail in the bundle: the mod's corgi.json names it,
+        # or mods.json does for a release made before the mod did.
+        files = {"mod.json": "{}", "main.js": "1", "test_unit.mjs": "ok", "test_smoke.mjs": "reads ../../demo", "stub.mjs": "s", "test_old.mjs": "o"}
+        work, _ = self.make_repo("goto", files, tag=False)
+        meta = work / "mods/goto/corgi.json"
+        write(meta, json.dumps({**json.loads(meta.read_text()), "bundle_exclude": ["test_smoke.mjs", "stub.mjs"]}))
+        git(work, "commit", "-qam", "chore: say what the bundle leaves out")
+        git(work, "tag", "v0.1.0")
+        git(work, "push", "-q", "origin", "HEAD", "--tags")
+        self.make_repo("corgi", {"mod.json": "{}", "main.js": "self"})
+        out_dir = self.tmp / "out"
+        out_dir.mkdir()
+        m = json.loads((self.tmp / "mods.json").read_text())
+        m["mods"]["goto"]["bundle_exclude"] = ["test_old.mjs"]
+        write(self.tmp / "mods.json", json.dumps(m))
+        shutil.copy(self.tmp / "mods.json", out_dir / "mods.json")
+        code, out = self.run_cli("bundle", str(out_dir))
+        self.assertEqual(code, 0, out)
+        self.assertEqual(sorted(p.name for p in (out_dir / "mods/goto").iterdir()), ["BUNDLED.md", "corgi.json", "main.js", "mod.json", "test_unit.mjs"])
+        self.assertEqual(check_bundle.verify(out_dir), [])
+        write(out_dir / "mods/goto/test_smoke.mjs", "copied anyway")
+        self.assertEqual(check_bundle.verify(out_dir), ["goto: test_smoke.mjs is not in v0.1.0"])
+
 
 if __name__ == "__main__":
     unittest.main()

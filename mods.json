@@ -8,7 +8,8 @@
     "pr-review": {
       "repo": "https://github.com/saefty/herdr-corgi-pr-review.git",
       "path": "mods/pr-review",
-      "default": true
+      "default": true,
+      "bundle_exclude": ["test_smoke.mjs"]
     },
     "chatbar": {
       "repo": "https://github.com/saefty/herdr-corgi-chatbar.git",
