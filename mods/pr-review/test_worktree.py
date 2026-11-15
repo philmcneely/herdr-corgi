@@ -32,6 +32,12 @@ with tempfile.TemporaryDirectory() as d:
     req = {"worktree": d, "head": v2, "items": [{"id": "f1", "file": "b.py", "line": 1, "title": "t", "since": v1}, {"id": "f2", "file": "a.py", "line": 1, "title": "u", "since": v1}]}
     p = verify.prompt(req)
     assert "[f1]" in p and "+y = 1" in p and "No change to the file" in p and "The file now, from line 1:" in p, p  # the checkout as it is (here: the rewritten head)
+    # A fix checked on its own branch, before it is in the PR: the item's own start, commit and worktree, not the PR head's.
+    git("checkout", "-q", "-b", "fix/1-f3", v2); pathlib.Path(d, "b.py").write_text("y = 2\n"); f.write_text("x = 4\n"); git("commit", "-qam", "fix")
+    fix = git("rev-parse", "HEAD")
+    req = {"worktree": d, "head": v2, "items": [{"id": "f3", "file": "b.py", "line": 1, "title": "t", "since": v2, "head": fix, "worktree": d, "branch": "fix/1-f3"}]}
+    p = verify.prompt(req)
+    assert "The whole diff of the fix branch fix/1-f3, not in the PR yet" in p and "+y = 2" in p and "+x = 4" in p, p  # the fix's other files too
 
 # Clones: a dedicated one first, else the local checkout of that repo; none: NeedClone with the first root's folder.
 with tempfile.TemporaryDirectory() as d:

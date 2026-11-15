@@ -13,6 +13,7 @@ import subprocess
 import sys
 import threading
 
+sys.dont_write_bytecode = True  # a .pyc written into the mod's folder reloads the mod: the view waiting for this run is gone
 import llm
 
 CLAUDE = ["claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",

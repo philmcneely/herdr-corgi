@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Explore: a walkthrough of existing code for a topic, without a PR ("How does the reminder job get scheduled and sent?").
 
-argv[1]: JSON (or @file) {root, repo, topic, model (haiku|sonnet|opus), context ({id, env}), out, status}. One call
+argv[1]: JSON (or @file) {root, repo, topic, model (sonnet|opus; a passed haiku runs as sonnet, llm.code_model), context ({id, env}), out, status}. One call
 ("Explore: walkthrough") with read-only tools (Read, Grep, Glob) in the repo, the review's budget for the model. It answers
 in the shape of a PR analysis: the question, how it works, layers in reading order with evidence (file:line), an
 architecture picture, pictures per layer and example values, every element marked existing. Writes {topic, root, repo,
@@ -14,6 +14,7 @@ import os
 import pathlib
 import sys
 
+sys.dont_write_bytecode = True  # a .pyc written into the mod's folder reloads the mod: the view waiting for this run is gone
 import llm  # noqa: E402  (this folder)
 import review  # the schemas and the picture guide the PR analysis uses
 
@@ -80,6 +81,7 @@ def main(req):
 
 if __name__ == "__main__":
     req = json.loads(pathlib.Path(sys.argv[1][1:]).read_text() if sys.argv[1].startswith("@") else sys.argv[1])
+    req["model"] = llm.code_model(req.get("model"))  # it reads code: never haiku
     status = req.get("status")
     if status:
         review.save(status, {"busy": True, "pid": os.getpid(), "started": dt.datetime.now().astimezone().isoformat(), "model": req["model"]})

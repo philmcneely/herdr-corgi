@@ -1,7 +1,7 @@
 // Run: node test_arch.mjs  (the architecture / blast radius layout: columns, lanes, ports, fans, stubs, hops, badges,
 // card sizes, focus, orchestrator states)
 import assert from "node:assert/strict";
-import { archLayout, archBands, archFocus, stateLayout, sourceStyle, hasSources, crossings, clampText, wrapLines, ARCH } from "./arch.js";
+import { archLayout, archBands, archFocus, archMarks, pathMark, labelLines, zoneArch, stateLayout, sourceStyle, hasSources, crossings, clampText, wrapLines, ARCH, LABEL } from "./arch.js";
 import { blastArch } from "./pr.js";
 
 const inside = (s, r) => (s.y1 === s.y2
@@ -16,6 +16,7 @@ function sane(L, what) {
   // Every call points left to right; nothing runs under the cards.
   for (const p of L.paths) {
     assert.equal(p.arrow.left, false, `${what}: ${p.mark} points left`);
+    if (p.kind === "long") continue; // runs under the picture to a card that is not in the next column (its own test)
     if (p.kind !== "stub") for (const f of p.from) assert.equal(node.get(p.to).col, node.get(f).col + 1, `${what}: ${p.mark} is a line but not to the next column`);
     for (const s of p.segments) assert.ok(Math.max(s.y1, s.y2) <= bottom + 4, `${what}: ${p.mark} runs below the cards`);
   }
@@ -275,6 +276,11 @@ const sync = {
   for (const e of lines) for (const sg of e.segments) for (const n of L.nodes.filter((x) => x.kind === "state")) assert.ok(!inside(sg, n), `${e.key} runs through ${n.id}`);
   assert.ok(at("\0start").y < at("open").y && at("open").y < at("rem").y && at("rem").y < at("over").y && at("over").y < at("ret").y && at("ret").y < at("\0end").y);
   for (const e of L.edges) for (const sg of e.segments) assert.ok(sg.y2 >= sg.y1, `${e.key} goes up`); // forward transitions only run down
+  // A transition that skips a row (open to returned) is one unbroken line, also beside the rows it passes.
+  for (const e of L.edges) e.segments.slice(1).forEach((sg, k) => assert.deepEqual([sg.x1, sg.y1], [e.segments[k].x2, e.segments[k].y2], `${e.key} has a gap after segment ${k}`));
+  // The picture is as wide as its lines and their labels, not only as its cards.
+  for (const e of L.edges) for (const sg of e.segments) assert.ok(Math.max(sg.x1, sg.x2) <= L.width, `${e.key} runs past the picture`);
+  for (const e of L.edges.filter((x) => x.text && !x.labelAt.left)) assert.ok(e.labelAt.x + Math.min(e.labelAt.w, e.text.length * 6 + 4) <= L.width, `the label of ${e.key} runs past the picture`);
   assert.deepEqual(L.backs.map((b) => [b.from, b.to, b.text, b.changed]), [["over", "open", "extend", true]]);
   assert.ok(L.backs[0].laneX < Math.min(...L.nodes.map((n) => n.x)), "the return lane is left of every card");
   assert.deepEqual(L.loops.map((l) => [l.id, l.text, l.changed]), [["rem", "remind again", true]]);
@@ -367,12 +373,249 @@ assert.deepEqual(clampText("short", 10, 3), { text: "short", lines: 1, cut: fals
     nodes: ["a1", "a2", "b1", "b2", "c1", "c2"].map((id) => ({ id, label: id, group: id[0] })),
     edges: [["a1", "a2"], ["a2", "b1"], ["b1", "b2"], ["b2", "c1"], ["c1", "c2"]].map(([from, to]) => ({ from, to, label: "calls" })) };
   const L = archLayout(arch);
-  assert.deepEqual(archBands(L, L.width + 10), [{ x0: 0, x1: L.width }]);
+  assert.deepEqual(archBands(L, L.width + 10), [{ x0: 0, x1: L.width, h: L.height, y0: 0, in: [], out: [] }]);
   const view = Math.round(L.width / 2.5), B = archBands(L, view);
   assert.ok(B.length >= 3, `${B.length} bands`);
   assert.equal(B[0].x0, 0); assert.equal(B.at(-1).x1, L.width);
   for (let k = 1; k < B.length; k++) assert.equal(B[k].x0, B[k - 1].x1);
   for (const b of B) assert.ok(b.x1 - b.x0 <= view, "a band fits the view");
   for (const b of B) for (const n of L.nodes) assert.ok(n.x + n.w <= b.x0 || n.x >= b.x1 || (n.x >= b.x0 && n.x + n.w <= b.x1), `cut through ${n.id}`);
+  // A cut sits right after the cards and numbers left of it, so the lanes of that gutter go on in the next band.
+  for (const b of B.slice(0, -1)) for (const p of L.paths) for (const g of p.segments) if (g.x1 === g.x2) assert.ok(g.x1 < b.x1 - 40 || g.x1 > b.x1, `a lane of ${p.mark} at the right edge of a band`);
+}
+// ---- the Architecture page's picture (opts.labels): the calls' texts on their lines, one Mailer card both mails reach
+// (a PR whose reminder is mailed twice: once directly, once by the consumer two columns further right).
+const mail = { groups: [{"id": "fd", "label": "Front desk Lambda"}, {"id": "core", "label": "Shared library code"}, {"id": "cons", "label": "Reminder consumer Lambda"}, {"id": "infra", "label": "AWS infrastructure"}],
+  nodes: [{"id": "handler", "group": "fd", "label": "handler (handler.py)", "description": "Front desk Lambda entry; now also serves POST /remind.", "status": "changed", "at": "library/handler.py:18"}, {"id": "reminders", "group": "core", "label": "reminders (reminders.py)", "description": "Selects loans for reminder/overdue and sends mail.", "status": "changed", "at": "library/reminders.py:16"}, {"id": "status", "group": "core", "label": "transition (status.py)", "description": "State machine with transition() that publishes events.", "status": "changed", "at": "library/status.py:43"}, {"id": "events", "group": "core", "label": "LoanEvent, Queue (events.py)", "description": "Immutable event and in-memory queue.", "status": "new", "at": "library/events.py:6"}, {"id": "consumer", "group": "cons", "label": "consumer (consumer.py)", "description": "SQS-triggered Lambda that mails members.", "status": "new", "at": "library/consumer.py:11"}, {"id": "queue", "group": "infra", "label": "LoanEvents (template.yaml)", "description": "SQS queue between the Lambdas.", "status": "new", "at": "template.yaml:11"}, {"id": "mailer", "group": "core", "label": "Mailer (mailer.py)", "description": "Sends mail.", "status": "unchanged"}],
+  edges: [{"from": "handler", "to": "consumer", "label": "Imports and calls handle() inline", "source": "implemented"}, {"from": "reminders", "to": "mailer", "label": "Sends reminder directly", "source": "implemented"}, {"from": "reminders", "to": "status", "label": "transition() per loan", "source": "implemented"}, {"from": "status", "to": "events", "label": "Publishes LoanEvent", "source": "implemented"}, {"from": "events", "to": "queue", "label": "Should send to SQS (only a list)", "source": "spec"}, {"from": "queue", "to": "consumer", "label": "Triggers batch of 10", "source": "implemented"}, {"from": "consumer", "to": "mailer", "label": "Sends second reminder mail", "source": "implemented"}] };
+{
+  const plain = archLayout(mail), L = archLayout(mail, "diff", () => 0, false, { labels: true });
+  sane(L, "mail");
+  // Without labels (a layer's flow) nothing changes: the second mail is a stub, no path has a text.
+  assert.equal(plain.paths.find((p) => p.from[0] === "consumer" && p.to === "mailer").kind, "stub");
+  assert.ok(plain.paths.every((p) => !p.text));
+  // With them it is a line into the one Mailer card: it enters from the left like the first mail's line, lower.
+  const second = L.paths.find((p) => p.from[0] === "consumer" && p.to === "mailer"), first = L.paths.find((p) => p.from[0] === "reminders" && p.to === "mailer");
+  const mailer = L.nodes.find((n) => n.id === "mailer"), bottom = Math.max(...L.nodes.map((n) => n.y + n.h));
+  assert.equal(second.kind, "long"); assert.equal(second.chip, undefined);
+  assert.deepEqual([second.arrow.x, first.arrow.x], [mailer.x, mailer.x]);
+  assert.ok(second.arrow.y > first.arrow.y && second.arrow.y < mailer.y + mailer.h);
+  for (const s of second.segments) for (const n of L.nodes) assert.ok(!inside(s, n), `the long line runs through ${n.id}`);
+  assert.ok(second.segments.some((s) => s.y1 === s.y2 && s.y1 > bottom), "it runs under the cards");
+  assert.ok(L.height > Math.max(...second.segments.map((s) => Math.max(s.y1, s.y2))), "and inside the picture");
+  // A call can be asked for as a line (the Security page's way from an entry to a finding): no stub then, also
+  // without texts on the lines.
+  const forced = archLayout(mail, "diff", () => 0, true, { lines: (i) => i === 6 }), fl = forced.paths.find((p) => p.edges.includes(6));
+  assert.deepEqual([fl.kind, fl.text, fl.chip], ["long", undefined, undefined]); sane(forced, "forced line");
+  // Every call has its text next to its number, on no card and on no other text; the gutters grew to hold them.
+  assert.ok(L.width > plain.width);
+  const texts = L.paths.map((p) => p.text);
+  assert.ok(texts.every(Boolean), "every call is labelled in the picture");
+  assert.deepEqual(L.paths.find((p) => p.to === "status").text.lines, ["transition() per", "loan"]); // 21 characters: one over a line
+  for (const p of L.paths) {
+    assert.ok(p.text.x > p.badge.x && Math.abs(p.text.y + p.text.h / 2 - p.badge.y) <= 1, `${p.mark}: the text sits right of its number`);
+    for (const n of L.nodes) assert.ok(!boxOver(p.text, n), `${p.mark}: text on ${n.id}`);
+    for (const q of L.paths) if (q !== p) assert.ok(!boxOver(p.text, q.text), `texts ${p.mark} ${q.mark} overlap`);
+    assert.ok(p.text.lines.length <= LABEL.LINES && p.text.lines.every((l) => l.length <= LABEL.CH));
+  }
+  // Code in a text breaks after its punctuation, not inside a name; plain words wrap as everywhere.
+  assert.deepEqual(labelLines("queue.publish(LoanEvent)", 20), ["queue.publish(", "LoanEvent)"]);
+  assert.deepEqual(labelLines("transition(loan, REMINDED/OVERDUE)", 20), ["transition(loan,", "REMINDED/OVERDUE)"]);
+  assert.deepEqual(labelLines("Calls consumer.handle in-process", 20), ["Calls", "consumer.handle", "in-process"]);
+  assert.deepEqual(labelLines("x".repeat(45), 20).map((l) => l.length), [20, 20, 5]);
+  assert.deepEqual(labelLines("", 20), []);
+  // A long text is cut after three lines (the legend then lists it whole); bands never cut through a text.
+  const long = archLayout({ ...mail, edges: mail.edges.map((e, i) => (i ? e : { ...e, label: "Imports the consumer module and calls its handle() inline, in the request path of the front desk" })) }, "diff", () => 0, false, { labels: true });
+  const cut = long.paths.find((p) => p.from[0] === "handler").text;
+  assert.equal(cut.cut, true); assert.equal(cut.lines.length, 3); assert.ok(cut.lines[2].endsWith("…"));
+  // A band is as tall as what is in it: the first columns have one row of cards, the long line runs under the last ones.
+  const hs = archBands(L, 900).map((b) => b.h);
+  assert.ok(hs.length > 1 && hs.every((h) => h > 0 && h <= L.height) && Math.max(...hs) === L.height, `band heights ${hs}`);
+  assert.equal(archBands(L, 0)[0].h, L.height);
+  // A line that goes on in the next band is named at both ends: what leaves a band on the right enters the next on the
+  // left, with the same numbers at the same height. Nothing enters the first band or leaves the last.
+  const BB = archBands(L, 900);
+  assert.deepEqual([BB[0].in, BB.at(-1).out], [[], []]);
+  BB.slice(0, -1).forEach((b, k) => { assert.ok(b.out.length > 0, `nothing leaves band ${k}`); assert.deepEqual(b.out, BB[k + 1].in); });
+  for (const b of BB) for (const m of [...b.in, ...b.out]) assert.ok(m.nums.length > 0 && m.nums.every((n) => L.paths.some((p) => p.num === n)));
+  assert.ok(BB.flatMap((b) => b.out).some((m) => m.back && m.nums.includes(L.paths.find((p) => p.kind === "long").num)), "the long line under the picture runs right to left");
+  // A cut falls on the side of its gutter that keeps the bands short: the queue's line runs down to the consumer's
+  // row, so its lane stays in the band of the tall column and the consumer's band is as tall as its frame.
+  const once = archLayout({ ...mail, edges: mail.edges.slice(0, -1) }, "diff", () => 0, false, { labels: true }); // without the long line under the picture
+  const queue = once.nodes.find((n) => n.id === "queue"), cons = once.groups.find((g) => g.id === "cons");
+  const last = archBands(once, once.width - queue.x - 100).at(-1);
+  assert.ok(last.x0 > queue.x + queue.w && last.x0 < cons.x, "the last band starts between the queue and the consumer");
+  assert.ok(last.h < queue.y, `the consumer's band is ${last.h} tall, the queue starts at ${queue.y}`);
+  for (const b of archBands(L, 900)) for (const p of L.paths) assert.ok(p.text.x + p.text.w <= b.x0 || p.text.x >= b.x1 || (p.text.x >= b.x0 && p.text.x + p.text.w <= b.x1), `a band cuts through text ${p.mark}`);
+  // A marked call keeps a row above its text for the mark, also when it has no label.
+  const marked = archLayout(mail, "diff", () => 0, false, { labels: true, marked: (es) => es.includes(0) }), mk = marked.paths.find((p) => p.edges.includes(0));
+  assert.equal(mk.text.mark, true); assert.equal(mk.text.h, L.paths.find((p) => p.edges.includes(0)).text.h + LABEL.MARK);
+  assert.ok(marked.paths.filter((p) => p !== mk).every((p) => !p.text.mark));
+}
+
+// ---- where findings sit on the picture: on the call or card they break, a reviewer's on the card of its file
+{
+  const f = (id, severity, file, line, breaks) => ({ id, severity, file, line, title: id, breaks });
+  const m = archMarks(mail, [
+    f("double", "high", "library/reminders.py", 21, { from: "consumer", to: "mailer", edge: "e6" }),
+    f("inline", "medium", "library/handler.py", 21, { from: "handler", to: "consumer" }), // no index: found by its ends
+    f("dead", "high", "library/reminders.py", 33, { node: "reminders" }),
+    f("reviewer", "medium", "repo/library/reminders.py", 23, null), // no breaks: the card of its file
+    f("low", "low", "library/reminders.py", 2, undefined), // above the card's line: still the file's card
+    f("gone", "high", "library/handler.py", 6, { node: "no-such-card" }), // an unknown card: by its file
+    f("nowhere", "high", "library/loans.py", 41, null)]); // no card for the file: not on the picture
+  assert.deepEqual([...m.edges.keys()], [6, 0]);
+  assert.deepEqual(m.edges.get(6), { findings: [m.edges.get(6).findings[0]], n: 1, breaks: 1, severity: "high" });
+  const r = m.nodes.get("reminders");
+  assert.deepEqual([r.n, r.breaks, r.severity, r.findings.map((x) => x.id)], [3, 1, "high", ["dead", "reviewer", "low"]]);
+  assert.deepEqual([m.nodes.get("handler").n, m.nodes.get("handler").breaks], [1, 0]);
+  assert.equal([...m.nodes.values()].concat([...m.edges.values()]).flatMap((x) => x.findings).some((x) => x.id === "nowhere"), false);
+  // Two cards of one file: the last one that starts at or above the finding's line.
+  const two = { nodes: [{ id: "a", at: "t.yaml:11" }, { id: "b", at: "t.yaml:28" }], edges: [] };
+  assert.deepEqual([...archMarks(two, [f("x", "low", "t.yaml", 30), f("y", "low", "t.yaml", 12), f("z", "low", "t.yaml", 3)]).nodes].map(([k, v]) => [k, v.n]), [["b", 1], ["a", 2]]);
+  // A finding that names its way in sits on that way's card, not on the card of its file (a template line).
+  const acc = [{ id: "acc1", node: "handler" }, { id: "acc9", node: "no-such-card" }];
+  const way = (ids) => [...archMarks(mail, [{ ...f("token", "high", "template.yaml", 18), reachable_from: ids }], acc).nodes.keys()];
+  assert.deepEqual([way(["acc1"]), way(["acc9", "acc1"]), way(["acc9"]), way([])], [["handler"], ["handler"], ["queue"], ["queue"]]);
+  // A bus merges calls: its mark is the sum, with the highest severity. Nothing marked: null.
+  assert.deepEqual(pathMark(m, { edges: [0, 6] }).severity, "high"); assert.equal(pathMark(m, { edges: [0, 6] }).n, 2);
+  assert.equal(pathMark(m, { edges: [3] }), null); assert.equal(pathMark(null, { edges: [0] }), null);
+  assert.deepEqual([...archMarks(null, [f("x", "low", "a.py", 1)]).nodes], []);
+}
+
+// ---- trust zones passed through the layout
+{
+  // Trust zones as the frames (the Security page): the zones are the groups, a card without a zone stands in a
+  // bare group (laid out, not drawn), a call over a boundary says so. Without zones the picture is untouched.
+  const zoned = { ...mail, zones: [{ id: "z_fd", name: "Front desk function", trust: "authenticated" }, { id: "z_app", name: "Application", trust: "internal" }],
+    nodes: mail.nodes.map((n) => ({ ...n, zone: n.id === "handler" ? "z_fd" : n.id === "mailer" || n.id === "queue" ? undefined : "z_app" })),
+    edges: mail.edges.map((e) => (e.from === "handler" ? { ...e, crosses: true } : e)) };
+  const za = zoneArch(zoned), Z = archLayout(za);
+  assert.deepEqual(Z.groups.map((g) => [g.label, g.trust ?? null, Boolean(g.bare)]), [["Front desk function", "authenticated", false], ["Application", "internal", false], ["", null, true], ["", null, true]]);
+  assert.deepEqual(Object.fromEntries(za.nodes.map((n) => [n.id, n.group])), { handler: "z_fd", reminders: "z_app", status: "z_app", events: "z_app", consumer: "z_app", queue: "\0free:infra", mailer: "\0free:core" });
+  assert.deepEqual(Z.paths.filter((p) => p.crosses).map((p) => p.from[0]), ["handler"]);
+  assert.deepEqual(za.edges, zoned.edges, "the calls keep their indexes: findings find their call");
+  assert.equal(zoneArch(mail), mail); assert.equal(zoneArch(null), null);
+  assert.ok(archLayout(mail).paths.every((p) => p.crosses === null));
+  // Wrapped, no band cuts through a frame: a wide zone goes whole into the next band.
+  const ZL = archLayout(za, "diff", () => 0, false, { labels: true }), app = ZL.groups.find((g) => g.label === "Application");
+  for (const view of [300, 500, 700, 900]) for (const b of archBands(ZL, view)) for (const g of ZL.groups.filter((x) => !x.bare))
+    assert.ok(!(g.x < b.x0 && b.x0 < g.x + g.w), `a band at ${view} px cuts ${g.label} at ${b.x0}`);
+  assert.ok(archBands(ZL, Math.round(app.w * 0.6)).length > 1, "a frame wider than the view still wraps around it");
 }
 console.log("ok");
+
+// ---- a mark names its finding
+{
+  const { markLine } = await import("./arch.js");
+  const f = (title, severity) => ({ title, severity });
+  assert.deepEqual(markLine({ n: 1, findings: [f("Front desk token defaults to empty, so an empty bearer token authenticates", "high")] }).text, "Front desk token defaults to…");
+  const two = markLine({ n: 2, findings: [f("Minor thing", "low"), f("No SQS publisher", "high")] });
+  assert.deepEqual([two.text, two.top.title], ["No SQS publisher and 1 more", "No SQS publisher"]);
+  assert.equal(markLine({ n: 1, findings: [f("`Queue.publish` never sends", "high")] }).text, "Queue.publish never sends");
+  assert.deepEqual(markLine(null), { text: "", top: null });
+}
+
+// ---- a finding a threat names sits at that threat's way in, not at its own (wrong) one or its file
+{
+  const { archMarks } = await import("./arch.js");
+  const arch = { nodes: [{ id: "fd", at: "handler.py:1" }, { id: "q", at: "template.yaml:10" }], edges: [{ from: "fd", to: "q" }] };
+  const tok = { id: "tok", severity: "high", file: "template.yaml", line: 14, reachable_from: ["acc2"] };
+  const access = [{ id: "acc1", node: "fd" }, { id: "acc2", node: "q" }];
+  assert.deepEqual([...archMarks(arch, [tok], access).nodes.keys()], ["q"], "without threats: its own way in");
+  assert.deepEqual([...archMarks(arch, [tok], access, [{ where: { access: "acc1" }, findings: ["tok"] }]).nodes.keys()], ["fd"]);
+  assert.deepEqual([...archMarks(arch, [tok], access, [{ where: { access: "acc1" }, findings: ["tok"], derived: true }]).nodes.keys()], ["q"], "a placeholder names nothing");
+  assert.deepEqual([...archMarks(arch, [tok], access, [{ where: { edge: "e0" }, findings: ["tok"] }]).edges.keys()], [0]);
+}
+
+// ---- a way in stays next to its caller from outside instead of being pulled to the end of its group
+{
+  const { archLayout } = await import("./arch.js");
+  const arch = { groups: [{ id: "x", label: "Callers" }, { id: "fd", label: "Front desk" }, { id: "c", label: "Consumer" }],
+    nodes: [{ id: "cl", group: "x" }, { id: "h", group: "fd" }, { id: "r", group: "fd" }, { id: "s", group: "fd" }, { id: "e", group: "fd" }, { id: "co", group: "c" }],
+    edges: [{ from: "cl", to: "h" }, { from: "r", to: "s" }, { from: "s", to: "e" }, { from: "h", to: "co" }, { from: "e", to: "co" }] };
+  const L = archLayout(arch), col = (id) => L.nodes.find((n) => n.id === id).col;
+  assert.equal(col("h"), col("cl") + 1, "the handler stands right after its caller");
+  assert.ok(L.paths.find((p) => p.from.includes("cl")).kind !== "stub", "the call into it is a line, no stub");
+}
+
+// A long line from the card above a next-column line no longer crosses it (the owner's picture, rebuilt with other
+// names): the card with the long line goes below, and its way down takes the lane that crosses nothing. A crossing
+// that stays keeps its hop (hops are crossings()).
+{
+  const N = (id, group, label) => ({ id, group, label, description: "d", type: "service", status: "new" });
+  const arch = { groups: [{ id: "ws", label: "Workstation", kind: "client" }, { id: "acc", label: "Account", kind: "cloud" }, { id: "store", label: "Storage", kind: "cloud" }],
+    nodes: [N("show", "ws", "show script"), N("toggle", "ws", "toggle script"), N("org", "acc", "Organizations"), N("mid", "acc", "Delivery"), N("bucket", "store", "Bucket")],
+    edges: [{ from: "show", to: "bucket", label: "reads events" }, { from: "toggle", to: "org", label: "detach / attach" }, { from: "mid", to: "bucket", label: "writes" }] };
+  for (const fit of [false, true]) {
+    const L = archLayout(arch, "diff", () => 0, fit, { labels: true }), y = (id) => L.nodes.find((n) => n.id === id).y;
+    assert.deepEqual([L.paths.find((p) => p.kind === "long")?.to, L.hops.length], ["bucket", 0]);
+    assert.ok(y("show") > y("toggle"), "the card with the long line sits below");
+    assert.equal(L.hops.length, crossings([...L.paths.filter((p) => p.kind === "next" || p.kind === "long"), ...L.trunks]).length);
+  }
+  // Where the order cannot help (one card each in two columns of a group), the long line's lane still goes where it
+  // crosses the fewest: here none.
+  const one = { ...arch, groups: [...arch.groups, { id: "ws2", label: "Other", kind: "client" }], nodes: arch.nodes.map((n) => (n.id === "toggle" ? { ...n, group: "ws2" } : n)) };
+  assert.equal(archLayout(one, "diff", () => 0, false, { labels: true }).hops.length, 0);
+  console.log("ok long lines cross less");
+}
+
+// Two long lines from one column nest instead of crossing: the one that ends further right starts lower and runs on
+// the lower channel (PR #2's reminders and handler, rebuilt with other names). Where no order helps, one crossing stays
+// with its hop.
+{
+  const N = (id, group, label) => ({ id, group, label, description: "d", type: "service", status: "new" });
+  const arch = { groups: [{ id: "g", label: "Lambda", kind: "lambda" }, { id: "h", label: "Middle", kind: "x" }, { id: "k", label: "Far", kind: "x" }],
+    nodes: [N("a", "g", "far caller"), N("b", "g", "near caller"), N("c", "g", "other"), N("m1", "h", "first"), N("t2", "h", "near target"), N("t3", "k", "far target")],
+    edges: [{ from: "a", to: "t3", label: "to the far one" }, { from: "b", to: "t2", label: "to the near one" }, { from: "c", to: "m1", label: "x" }, { from: "m1", to: "t2", label: "x" }, { from: "t2", to: "t3", label: "y" }] };
+  for (const fit of [false, true]) {
+    const L = archLayout(arch, "diff", () => 0, fit, { labels: true }), y = (id) => L.nodes.find((n) => n.id === id).y;
+    assert.deepEqual([L.paths.filter((p) => p.kind === "long").length, L.hops.length], [2, 0]);
+    assert.ok(y("a") > y("b"), "the line that ends further right starts lower");
+  }
+  console.log("ok long lines nest");
+}
+
+// Lines that run on top of each other are counted (overlapsOf) and the lanes avoid them: a chain of checks, each
+// with a "no" to its own answer and a "yes" to the next check (a flow from PR #1, rebuilt with other names).
+{
+  const { overlapsOf } = await import("./arch.js");
+  const { flowArch } = await import("./views.js");
+  const note = (k) => "A short note about this step of the check.".repeat(3).slice(0, k);
+  const n = ([id, label, k]) => ({ id, label, ...(k ? { note: note(k) } : {}), changed: true, source: "implemented" });
+  const v = { kind: "flow", title: "checks", nodes: [["ev", "Incoming event", 87], ["c1", 'Starts with "Key "?', 0], ["c2", "compare(key, SECRET)?", 83], ["c3", 'path == "/list"?', 0],
+    ["call", "api.list({})", 42], ["r1", "401 missing key", 0], ["r2", "403 wrong key", 0], ["r3", "404 not found", 0], ["r4", "200 + json(body)", 0]].map(n),
+    edges: [["ev", "c1", "authorization header"], ["c1", "r1", "no"], ["c1", "c2", "yes"], ["c2", "r2", "no"], ["c2", "c3", "yes"], ["c3", "r3", "no"], ["c3", "call", "yes"],
+      ["call", "r4", "status, body"]].map(([from, to, label]) => ({ from, to, label, changed: true, source: "implemented" })) };
+  for (const fit of [false, true]) {
+    const L = archLayout(flowArch(v), "diff", () => 0, fit, { labels: true }), drawn = [...L.paths.filter((p) => p.kind === "next" || p.kind === "long"), ...L.trunks];
+    assert.deepEqual([overlapsOf(drawn).length, L.overlaps.length], [0, 0]);
+  }
+  // The count itself: one stretch shared, a touch at a corner is none, the same path never overlaps itself.
+  const P = (key, ...segments) => ({ key, segments });
+  assert.equal(overlapsOf([P("a", { x1: 0, y1: 10, x2: 50, y2: 10 }), P("b", { x1: 40, y1: 11, x2: 90, y2: 11 })]).length, 1);
+  assert.equal(overlapsOf([P("a", { x1: 0, y1: 10, x2: 50, y2: 10 }), P("b", { x1: 50, y1: 10, x2: 90, y2: 10 })]).length, 0);
+  assert.equal(overlapsOf([P("a", { x1: 5, y1: 0, x2: 5, y2: 40 }, { x1: 5, y1: 20, x2: 5, y2: 60 })]).length, 0);
+  assert.equal(overlapsOf([P("a", { x1: 5, y1: 0, x2: 5, y2: 40 }), P("b", { x1: 6, y1: 20, x2: 6, y2: 60 })]).length, 1);
+  console.log("ok overlaps");
+}
+
+// A long line from the top card of its column runs over the picture when that saves a crossing (PR #2's reminders →
+// mailer, rebuilt with other names): no crossing and no shared stretch left, the picture moved down by the room for
+// the channel (L.top), and a band without the line can leave that room out (y0).
+{
+  const N = (id, group, label) => ({ id, group, label, description: "d", type: "service", status: "new" });
+  const arch = { groups: [{ id: "in", label: "Callers", kind: "x" }, { id: "fd", label: "Front", kind: "lambda" }, { id: "q", label: "Queue", kind: "x" }, { id: "rc", label: "Consumer", kind: "lambda" }],
+    nodes: [N("client", "in", "client"), N("handler", "fd", "handler"), N("rem", "fd", "producer"), N("status", "fd", "state machine"), N("events", "fd", "events"), N("queue", "q", "queue"),
+      N("consumer", "rc", "consumer"), N("store", "rc", "store"), N("mailer", "rc", "mailer")],
+    edges: [["client", "handler", "POST /x"], ["rem", "status", "transition"], ["rem", "mailer", "mails directly"], ["handler", "consumer", "direct call"], ["status", "events", "publish"],
+      ["events", "queue", "send"], ["queue", "consumer", "trigger"], ["consumer", "store", "read"], ["consumer", "mailer", "send mail"]].map(([from, to, label]) => ({ from, to, label })) };
+  for (const fit of [false, true]) {
+    const L = archLayout(arch, "diff", () => 0, fit, { labels: true }), up = L.paths.filter((p) => p.kind === "long" && p.segments.some((s) => s.y1 === s.y2 && s.y1 < L.top));
+    assert.deepEqual([L.hops.length, L.overlaps.length, up.length, L.top > 0], [0, 0, 1, true]);
+    assert.ok(Math.min(...L.nodes.map((n) => n.y), ...L.groups.map((g) => g.y)) >= L.top, "nothing but the channel above");
+    const B = archBands(L, Math.round(L.width / 3));
+    assert.ok(B.some((b) => b.y0 === 0) && B.every((b) => b.y0 <= L.top));
+  }
+  console.log("ok a line over the picture");
+}

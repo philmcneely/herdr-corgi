@@ -73,7 +73,7 @@ closes (removed, quit), it sets both to `null`, so Go to offers no row that nobo
 
 ## 4. Chat bar (optional)
 
-"Discuss in chat" drafts a finding for the PR's agent without sending it. When a chat mod sets
+"Ask an agent…" drafts a finding for the PR's agent without sending it. When a chat mod sets
 `chatbar.api = {version: 1}`, pr-review hands the draft over instead of opening its own window:
 
 ```js

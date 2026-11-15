@@ -3,9 +3,10 @@
 // Two states (views.js panelState): picking (no PR chosen yet, or back with ← in the header: reviews in progress,
 // three then "Show all", the sources and the list) and a chosen PR or the current branch (its title and actions, then
 // Diff or Walkthrough as tabs). Click a line (shift-click: a range): a composer opens under it, GitHub style; Enter
-// adds a comment for the pending review, "Ask" sends one question at once. "Send review" sends every comment as one
-// prompt: for a picked PR to the session that made it, else to this space's Claude agent (or a new one). Keys, after
-// clicking the diff: j/k change, n/p file, c comment, Esc.
+// adds a comment for the pending review, "Ask" sends one question at once. The pending comments show as a count: for
+// a PR, "Finish your review" opens the review layout's step of that name (post to GitHub or send to an agent); a
+// branch without a PR sends them as one prompt to this space's Claude agent (or a new one). Keys, after clicking the
+// diff: j/k change, n/p file, c comment, Esc.
 // "Walkthrough": the review layout's AI analysis (review.py) read in reading order; it runs only on a click, there,
 // cached in pr-data/cache. UI text is English. "Review": the PR in the review layout (review.js; this mod
 // with props {part: "bar" | "review"}). The list shows a triage line per open PR from cached data (pr.js triageOf);
@@ -16,13 +17,14 @@
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar, Editor, EditorState, TextView } from "gpui-base";
 import { spaces, panes, focused, agents, exec, hc, run, theme, settings, readTextFile, writeTextFile, shared, setShared, appHome, home, layout, props, watchFolder, nextCommand } from "herdr";
-import { diffRows, buildPrompt, splitPatch, selection, nextChange, lineLabel, anchorRow, buildReview, hunksOf, hash, uiLine, reviewRequest, mapReview, progressLine, triageOf } from "./pr.js";
-import { parsePrRef, ghTarget, pruneSources } from "./pr.js";
+import { diffRows, buildPrompt, splitPatch, selection, nextChange, lineLabel, anchorRow, buildReview, hunksOf, hash, uiLine, reviewRequest, mapReview, triageOf, isSecurity } from "./pr.js";
+import { parsePrRef, ghTarget, pruneSources, codeModel, windowActive } from "./pr.js";
 import * as C from "./context.js";
+import { tabArgs } from "./threads.js"; // a new Claude tab with the PR's text: no MCP servers
 import { loadDiff, saveDiff } from "./diffcache.js";
 import { setupBanner, renderSetup, loadSetup, runSetup, openUrl, readConfig } from "./setup-view.js";
-import { chip, triageTip, PRIORITY_TIP } from "./stack.js";
-import { panelState, bodyTab, capped, IN_PROGRESS_MAX, diffTooLarge, filesToDiff } from "./views.js";
+import { chip, PRIORITY_TIP } from "./stack.js";
+import { panelState, bodyTab, capped, IN_PROGRESS_MAX, diffTooLarge, filesToDiff, isOpenPr, byState, listRows, riskSignal, progressText, pendingText, rowMarks } from "./views.js";
 import { ReviewMode, startReview, startExplore, saveKey, flowCard, modelPills, modelLabel, renderReviews, renderAgentBar, renderKeys, renderCardMenu, renderMini } from "./review.js";
 import { highlightJob, highlightStep, langOf, colors, renderLine, editorSyntax } from "./syntax.js";
 
@@ -30,15 +32,16 @@ import { highlightJob, highlightStep, langOf, colors, renderLine, editorSyntax }
 const LANG = { ts: "js", tsx: "js", mts: "js", cts: "js", jsx: "js", mjs: "js", toml: "yaml", jsonc: "json", svelte: "html", vue: "html" };
 const PRESETS = [["Explain", "Explain this change to me: what it does and why."], ["Look up docs", "Look up the docs for the APIs, classes and functions used here and summarize what matters for this spot."]];
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];
-const PRS_MS = 5 * 60 * 1000; // prs.py: transcripts by stamp, open PRs' state from GitHub
+const PRS_MS = 5 * 60 * 1000; // prs.py: transcripts by stamp, open PRs' state from GitHub; only while the list can be seen (scanIfDue)
 const PR_INFO_MS = 5 * 60 * 1000; // a branch's PR / a picked PR's head (gh pr view): asked again in the background after this
 const TTL_MS = 10 * 60 * 1000; // a remembered context is shown as is (no exec) unless dirty or older than this
 const MEMO = 8, WATCHES = 3; // remembered contexts; repos watched at once
 const IGNORED = /\/(node_modules|target|dist|build|\.venv|__pycache__)\/|\/\.git\/(?!HEAD$|index$|refs\/)/; // changes that don't make a diff dirty
 const cacheDir = () => `${appHome()}/pr-data/cache`;
-// The model for walkthroughs and the review analysis: the review layout's picker (shared), Sonnet by default.
-const walkModel = () => { const m = shared("review.model"); return typeof m === "string" && m ? m : "sonnet"; }; // as review.js model()
-const STATE = { open: "ansi2", draft: "dim", merged: "ansi5", closed: "ansi1" };
+// The model for walkthroughs and the review analysis: the review layout's picker (shared), Sonnet by default and at
+// least Sonnet (pr.js codeModel: an old haiku pick reads as sonnet).
+const walkModel = () => { const m = shared("review.model"); return codeModel(typeof m === "string" && m ? m : "sonnet"); }; // as review.js model()
+const STATE = { open: "ansi2", draft: "muted", merged: "ansi5", closed: "ansi1" };
 const WEIGHT = { key: ["key", "ansi3"], skim: ["skim", "dim"] };
 const COVER = { seen: ["done", "ansi2"], partly: ["partly", "ansi3"], absent: ["missing", "ansi1"] };
 const SPIN = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -54,6 +57,7 @@ const SOURCE_MS = 3 * 60 * 1000, SOURCE_KEEP = 20, PICKED_KEEP = 20;
 const GH_FIELDS = "number,title,author,headRefName,headRefOid,baseRefName,updatedAt,isDraft,reviewDecision,additions,deletions,url";
 const REVIEW = { APPROVED: ["approved", "ansi2"], CHANGES_REQUESTED: ["changes requested", "ansi1"], REVIEW_REQUIRED: ["review required", "ansi3"] };
 const BRANCH = "branch"; // shared "pr.selected": the current branch was picked (not a PR)
+const SEC_MARK = "⛨"; // security's own mark in a PR row (a shield), next to the word
 const age = (iso) => { const m = Math.round((Date.now() - Date.parse(iso)) / 60000); return !Number.isFinite(m) ? "" : m < 60 ? `${m}m` : m < 2880 ? `${Math.round(m / 60)}h` : `${Math.round(m / 1440)}d`; };
 
 function location() {
@@ -120,7 +124,7 @@ export default class PrReview extends View {
     this.repos = new Map(); this.prInfo = new Map(); this.memo = new Map(); this.dirty = new Set(); this.watching = new Map(); this.heads = new Map();
     if (this.part === "review") return this.initReview(cx);
     if (visible()) this.refresh(cx);
-    // Key commands (keys.json "pr-review.<name>"): picker (the PR list), source:mine|repo|review, setup, walkthrough, review.
+    // Key commands (keys.json "pr-review.<name>"): picker (the PR list), source:mine|repo|review, merged, setup, walkthrough, review, finish.
     cx.spawn(async (cx) => {
       for (;;) {
         const c = String(await nextCommand()), [name, arg] = [c.split(":")[0], c.split(":").slice(1).join(":")];
@@ -129,7 +133,11 @@ export default class PrReview extends View {
         else if (c === "setup") { this.view = "setup"; runSetup(this, cx, false); }
         else if (c === "walkthrough") this.openWalk(cx, false);
         else if (c === "review" && this.pr?.url) startReview(this.prSel ?? this.branchTarget());
+        else if (c === "finish") this.finishReview(); // the pending comments' "Finish your review"
+        else if (c === "merged") this.showDone = !this.showDone; // the list's "Merged or closed" row (a toggle)
         else if (name === "explore") startExplore(arg || null); // pr-review.explore[:<folder>]: a topic in existing code, no PR
+        // For keys and scripted demos: a listed PR's row click (pick:<number>, the shown source's list).
+        else if (name === "pick") { const pr = this.listNow().find((p) => String(p.number) === arg); if (pr) this.pickTarget(pr, cx); }
         cx.notify();
       }
     });
@@ -146,9 +154,9 @@ export default class PrReview extends View {
       if (url === BRANCH && !this.prSel) this.branchPicked = true;
       const pr = url && url !== BRANCH && !this.prSel ? this.prs.find((p) => p.url === url) ?? (shared("pr.picked") ?? {})[url] : null;
       if (pr) this.choose(pr, cx);
-      await this.scanPrs(cx);
+      this.scanIfDue(cx);
     });
-    cx.timer.every(PRS_MS, (cx) => cx.spawn(async (cx) => { if (await this.scanPrs(cx) && this.prSel && inView()) this.refresh(cx); }));
+    cx.timer.every(60000, (cx) => this.scanIfDue(cx)); // a time check; prs.py itself at most every PRS_MS
   }
 
   key() { return this.prSel?.url ?? JSON.stringify(location()); }
@@ -186,6 +194,14 @@ export default class PrReview extends View {
     await writeTextFile(lock, "0", mine).catch(() => null);
     await this.loadPrs(cx);
     return true;
+  }
+
+  // prs.py only while someone can see the list: the panel shown (or placed in a layout without it) and the window in
+  // front. Hidden or behind other windows it asks nothing; shown again, it asks once the last try is PRS_MS old.
+  scanIfDue(cx) {
+    if (!visible() || !windowActive() || Date.now() - (this.scanAt ?? 0) < PRS_MS) return;
+    this.scanAt = Date.now();
+    cx.spawn(async (cx) => { if (await this.scanPrs(cx) && this.prSel && inView()) this.refresh(cx); });
   }
 
   // A folder's repo: {root, gitdir, base: origin's default branch}, one spawn per folder; null outside a repo.
@@ -245,12 +261,19 @@ export default class PrReview extends View {
     if (seen && Date.now() - seen.at < PR_INFO_MS) return;
     this.heads.set(pr.url, { at: Date.now(), sha: seen?.sha ?? pr.headSha });
     cx.spawn(async (cx) => {
-      const v = await exec("gh", ["pr", "view", pr.url, "--json", "headRefOid"], { timeout: 30000 }).catch(() => null);
-      const sha = v?.code === 0 ? JSON.parse(v.stdout).headRefOid : null;
+      const sha = await this.headOf(pr.url);
       if (!sha) return;
       this.heads.set(pr.url, { at: Date.now(), sha });
       if (this.prSel?.url === pr.url && sha !== this.prSel.headSha) { this.prSel = { ...this.prSel, headSha: sha }; this.refresh(cx, true); }
     });
+  }
+
+  // A PR's head from GitHub (gh pr view), null when gh can't say; asked once at a time per PR (a second ask shares it).
+  headOf(url) {
+    const busy = (this.headIn ??= new Map());
+    if (!busy.has(url)) busy.set(url, exec("gh", ["pr", "view", url, "--json", "headRefOid"], { timeout: 30000 })
+      .then((v) => (v.code === 0 ? JSON.parse(v.stdout).headRefOid ?? null : null)).catch(() => null).finally(() => busy.delete(url)));
+    return busy.get(url);
   }
 
   choose(pr, cx) {
@@ -354,12 +377,18 @@ export default class PrReview extends View {
   // A new source: its pending comments, and its walkthrough when that view is open.
   async syncSource(cx) {
     const key = this.sourceKey();
-    if (key === this.reviewKey) return;
+    if (key === this.reviewKey) {
+      // The review on a new head of the same PR (checkHead): its hunks, checkout and analysis state again; whole files
+      // were read at the old head.
+      const head = this.prSel?.headSha;
+      if (this.part === "review" && head && this.srcHead && head !== this.srcHead) { this.srcHead = head; this.full = {}; await this.onSource(cx); }
+      return;
+    }
     this.reviewKey = key; this.editing = null; this.walk = null; this.walkError = null; this.read = new Set(); this.step = 0;
     const text = key ? await readTextFile(reviews()).catch(() => null) : null;
     this.comments = (text ? JSON.parse(text)[key] : null) ?? [];
     if (this.view === "walk") this.openWalk(cx, false);
-    if (this.part === "review") await this.onSource(cx);
+    if (this.part === "review") { this.srcHead = this.prSel?.headSha ?? null; await this.onSource(cx); }
   }
 
   async load(path, context) {
@@ -432,6 +461,14 @@ export default class PrReview extends View {
     if (this.part === "review") { this.registerReview(cx); this.publish(); }
   }
 
+  // The panel's "Finish your review" (also the finish command here): the PR opens in the review layout, whose copy
+  // takes shared "pr.finish" and opens its popover of that name with these pending comments (render, part "review").
+  finishReview() {
+    if (!this.pr?.url || !this.comments.length) return;
+    setShared("pr.finish", { url: this.pr.url, at: Date.now() });
+    startReview((shared("review.open") ?? []).find((r) => r.url === this.pr.url)?.target ?? this.prSel ?? this.branchTarget());
+  }
+
   sendReview(cx) {
     if (!this.comments.length) return;
     const sent = this.comments;
@@ -488,7 +525,7 @@ export default class PrReview extends View {
           run("tab.new", { space: this.spaceFor(ctx, origin.cwd, this.root), folder: origin.cwd, name: `PR #${origin.number}`, argv: [...this.ctxEnv(origin.sessionContext ?? ctx), "claude", "--resume", origin.session], task: prompt });
           this.note = `${what}: resumed the PR's session in a new tab`;
         } else {
-          run("tab.new", { space: this.spaceFor(ctx, this.root), folder: this.root ?? location().cwd, name: "PR-Review", argv: [...this.ctxEnv(ctx), "claude"], task: prompt });
+          run("tab.new", { space: this.spaceFor(ctx, this.root), folder: this.root ?? location().cwd, name: "PR-Review", argv: tabArgs({ env: this.ctxEnv(ctx), model: walkModel() }), task: prompt });
           this.note = `${what}: started a new Claude tab`;
         }
         done(cx);
@@ -543,7 +580,7 @@ export default class PrReview extends View {
   }
 
   // The Walkthrough tab: one scrolling column (so nothing overflows onto what's below at any width): title, summary,
-  // a meta line with "⋯" (the model and "Open review ↗"), the compact step list, the picked step's text and hunks.
+  // a meta line with "⋯" (the model and "Open review ↗"), the compact list of layers, the picked layer's text and hunks.
   walkView(t) {
     const w = this.walk, now = new Map((this.walkHunks ?? []).map((h) => [h.id, h])), sid = `walk-${this.uid}`;
     const scroll = (el) => div().flex_1().min_h(0).relative().child(el.id(sid).absolute().inset_0().overflow_y_scroll())
@@ -557,7 +594,7 @@ export default class PrReview extends View {
     const covered = new Set(w.steps.flatMap((s) => s.hunks));
     const left = [...now.values()].filter((h) => !covered.has(h.id));
     const steps = [...w.steps.map((s) => ({ ...s, stale: s.hunks.length > 0 && !s.hunks.some((id) => now.has(id)) }))];
-    if (left.length) steps.push({ title: `Not covered (${left.length} hunks)`, text: w.cut?.length ? `${w.cut.length} of them were too large to send to Haiku.` : "No step explains these hunks.", hunks: left.map((h) => h.id) });
+    if (left.length) steps.push({ title: `Not covered (${left.length} hunks)`, text: w.cut?.length ? `${w.cut.length} of them were too large to send to the model.` : "No layer explains these hunks.", hunks: left.map((h) => h.id) });
     if (w.asks.length) steps.push({ title: "Check against the task", asks: w.asks, hunks: [] });
     const cur = steps[Math.min(this.step, steps.length - 1)];
     const done = w.steps.filter((_s, i) => this.read.has(i)).length;
@@ -566,7 +603,7 @@ export default class PrReview extends View {
         .child(div().font_semibold().whitespace_normal().child(w.title || "Walkthrough"))
         .child(div().text_size(12).text_color(t.muted).whitespace_normal().child(w.summary))
         .child(h_flex().gap(8).items_center().text_size(11).text_color(t.dim)
-          .child(div().flex_1().min_w(0).truncate().child(`${done} of ${w.steps.length} read · ${modelLabel(w.model) ?? "Haiku"}${w.cost != null ? ` · $${w.cost.toFixed(3)}` : ""}${w.cut?.length ? ` · ${w.cut.length} hunks cut` : ""}`))
+          .child(div().flex_1().min_w(0).truncate().child(`${done} of ${w.steps.length} layers read · ${modelLabel(w.model) ?? "model unknown"}${w.cost != null ? ` · $${w.cost.toFixed(3)}` : ""}${w.cut?.length ? ` · ${w.cut.length} hunks cut` : ""}`))
           .when(Boolean(this.walkBusy), (e) => e.child(div().child(SPIN[0]).frames(SPIN, 90)))
           .child(pill(`walk-more-${this.uid}`, t, "⋯", (_e, cx) => { this.walkMore = !this.walkMore; cx.notify(); }, this.walkMore, "Show or hide the model choice and more options", "More walkthrough options")))
         .when(Boolean(this.walkMore), (e) => e.child(h_flex().flex_wrap().gap(8).items_center().pt(2)
@@ -574,13 +611,13 @@ export default class PrReview extends View {
           .when(Boolean(this.pr?.url), (e) => e.child(pill(`walk-redo-${this.uid}`, t, "Open review ↗", (_e, cx) => this.openWalk(cx, true), false, "Open this PR in the review layout")))))
         .when(Boolean(this.walkError), (e) => e.child(div().text_size(11).text_color(t.ansi1).whitespace_normal().child(this.walkError))))
       .child(v_flex().px(6).py(4).border_t(1).border_b(1).border_color(t.border).children(steps.map((s, i) =>
-        h_flex().id(`step-${i}-${this.uid}`).h(24).flex_none().px(8).gap(8).items_center().rounded(6).cursor_pointer().text_size(12.5).tooltip("Show this step and mark it read (✓ read, ○ unread)")
+        h_flex().id(`step-${i}-${this.uid}`).h(24).flex_none().px(8).gap(8).items_center().rounded(6).cursor_pointer().text_size(12.5).tooltip("Show this layer and mark it read (✓ read, ○ unread)")
           .when(cur === s, (e) => e.bg(t.selected)).hover((st) => st.bg(t.hover))
           .on_click((_e, cx) => { this.step = i; if (i < w.steps.length) this.read.add(i); cx.notify(); })
           .child(div().w(12).flex_none().text_color(this.read.has(i) ? t.ansi2 : t.dim).child(i >= w.steps.length ? "·" : this.read.has(i) ? "✓" : "○"))
           .child(div().flex_1().min_w(0).truncate().text_color(s.stale ? t.dim : t.foreground).child(s.title))
-          .when(Boolean(s.stale), (e) => e.child(div().id(`step-o-${i}-${this.uid}`).tooltip("The code changed since this step was written").text_size(10.5).text_color(t.ansi3).child("outdated")))
-          .when(Boolean(WEIGHT[s.weight]), (e) => e.child(div().id(`step-w-${i}-${this.uid}`).tooltip(s.weight === "key" ? "Key step: worth reading closely" : "Minor step: a skim is enough").text_size(10.5).text_color(t[WEIGHT[s.weight]?.[1]]).child(WEIGHT[s.weight]?.[0] ?? ""))))))
+          .when(Boolean(s.stale), (e) => e.child(div().id(`step-o-${i}-${this.uid}`).tooltip("The code changed since this layer was written").text_size(10.5).text_color(t.ansi3).child("outdated")))
+          .when(Boolean(WEIGHT[s.weight]), (e) => e.child(div().id(`step-w-${i}-${this.uid}`).tooltip(s.weight === "key" ? "Key layer: worth reading closely" : "Minor layer: a skim is enough").text_size(10.5).text_color(t[WEIGHT[s.weight]?.[1]]).child(WEIGHT[s.weight]?.[0] ?? ""))))))
       .child(div().px(14).py(10).text_size(12.5).whitespace_normal().child(cur?.text ?? ""))
       .children((cur?.flows ?? []).map((f, k) => div().px(12).pb(6).child(flowCard(f, t, `wf-${this.uid}-${this.step}-${k}`))))
       .children((cur?.asks ?? []).map((a, i) => h_flex().id(`ask-${i}`).px(14).py(3).gap(8).text_size(12)
@@ -632,13 +669,16 @@ export default class PrReview extends View {
       const now = this.sourceNow();
       if (now === "mine") { this.loadTriage(cx); return cx.notify(); }
       const sr = this.spaceSlug, key = now === "repo" ? (sr ? `repo:${sr.slug}` : null) : "review";
-      if (!key) { this.srcLists.repo = { key: null, prs: [], error: "The active space is not a GitHub repo" }; return cx.notify(); }
+      if (!key) { this.srcLists.repo = { key: null, prs: [] }; this.loadTriage(cx); return cx.notify(); } // no GitHub repo here: the list says what to do
       const before = await readTextFile(sourcesFile()).catch(() => null), doc = JSON.parse(before ?? "{}");
       if (!force && doc[key] && Date.now() - doc[key].at < SOURCE_MS) { this.srcLists[now] = { key, ...doc[key] }; this.loadTriage(cx); return cx.notify(); }
+      if (this.srcIn === key) return; // this list is being fetched: that answer serves this ask too
+      this.srcIn = key;
       this.srcLists[now] = { key, prs: doc[key]?.prs ?? [], at: doc[key]?.at, loading: true }; cx.notify();
       const args = now === "repo" ? ["pr", "list", "-R", sr.slug, "--state", "open", "--limit", "50", "--json", GH_FIELDS]
         : ["search", "prs", "--review-requested=@me", "--state", "open", "--limit", "50", "--json", "repository,number,title,author,updatedAt,url,isDraft"];
       const r = await exec("gh", args, { timeout: 60000 }).catch((e) => ({ code: 1, stderr: String(e) }));
+      this.srcIn = null;
       if (r.code !== 0) { this.srcLists[now] = { ...this.srcLists[now], loading: false, error: `gh: ${r.stderr.trim().slice(0, 160)}` }; return cx.notify(); }
       const spaceC = spaceCtx(location().space);
       const prs = JSON.parse(r.stdout).map((p) => {
@@ -688,7 +728,7 @@ export default class PrReview extends View {
     setShared("goto.handlers.review", [{ pattern: "github\\.com/([\\w.-]+)/([\\w.-]+)/pull/(\\d+)", title: "Review PR #{number} · {title}",
       subtitle: "{owner}/{repo}", run: [["goto.set", open]] }]);
     setShared("goto.items.review", (shared("review.open") ?? []).map((r) => ({ id: `review:${r.url}`, title: `Resume review #${r.number} ${r.title ?? ""}`,
-      subtitle: [r.repo, progressLine(r.progress)].filter(Boolean).join(" · "), tag: "Review", url: r.url, keywords: [String(r.number), r.repo ?? ""],
+      subtitle: [r.repo, progressText(r.progress)].filter(Boolean).join(" · "), tag: "Review", url: r.url, keywords: [String(r.number), r.repo ?? ""],
       run: [["goto.set", { key: "pr.goto", value: { url: r.url } }]] })));
   }
 
@@ -727,22 +767,28 @@ export default class PrReview extends View {
   }
 
   // The open PRs' triage (pr.js triageOf) from what is cached: the latest analysis, findings, related PRs, diff size,
-  // and triage.py's why/priority. Reads files only (no gh, no LLM); when the list opens.
+  // and triage.py's why/priority; and each row's risk signal (views.js riskSignal), also for the reviews in progress
+  // that are not in the list. Reads files only (no gh, no LLM); when the list opens.
   loadTriage(cx) {
-    const open = this.listNow().filter((p) => p.state === "open" || p.state === "draft").slice(0, TRIAGE_MAX), m = walkModel();
+    const open = this.listNow().filter(isOpenPr).slice(0, TRIAGE_MAX), listed = new Set(open.map((p) => p.url)), m = walkModel();
+    const rest = (shared("review.open") ?? []).filter((r) => shownIn(r) && !listed.has(r.url)).map((r) => r.target ?? r);
     cx.spawn(async (cx) => {
       const llm = JSON.parse(await readTextFile(triageFile()).catch(() => null) ?? "{}"), read = (f) => readTextFile(f).then((x) => (x ? JSON.parse(x) : null)).catch(() => null);
-      const out = new Map();
-      await Promise.all(open.map(async (pr) => {
+      const out = new Map(), risk = new Map();
+      await Promise.all([...open, ...rest].map(async (pr) => {
         const h = hash(pr.url), head = pr.headSha ?? hash(`${pr.updatedAt}|${pr.head}`);
-        const [an, fd, ctx, diff] = await Promise.all([read(`${cacheDir()}/rv-${h}-${m}.json`), read(`${appHome()}/pr-data/findings/${h}.json`),
-          pr.headSha ? read(`${cacheDir()}/ctx-${h}-${pr.headSha}.json`) : null, read(`${cacheDir()}/diff-${h}-${head}.json`)]);
-        const files = diff ? splitPatch(diff.text) : null;
-        const security = (fd?.findings ?? []).filter((f) => f.reviewer === "security" && !["fixed", "dismissed"].includes(fd.status?.[f.id]?.s));
-        out.set(pr.url, triageOf({ pr, analysis: an?.answer ? mapReview(an.answer, []) : null, size: files && { files: files.length, lines: files.reduce((n, f) => n + f.add + f.del, 0) },
+        const [an, fd] = await Promise.all([read(`${cacheDir()}/rv-${h}-${m}.json`), read(`${appHome()}/pr-data/findings/${h}.json`)]);
+        const analysis = an?.answer ? mapReview(an.answer, []) : null;
+        risk.set(pr.url, riskSignal({ analysis, findings: fd?.findings, status: fd?.status }));
+        if (!listed.has(pr.url)) return;
+        // The diff's size from its cache (in parts, diffcache.js); a missing one leaves the effort to the analysis.
+        const [ctx, diff] = await Promise.all([pr.headSha ? read(`${cacheDir()}/ctx-${h}-${pr.headSha}.json`) : null, loadDiff(`${cacheDir()}/diff-${h}-${head}`, pr.url, head, readTextFile)]);
+        const files = diff ? splitPatch(diff) : null;
+        const security = (fd?.findings ?? []).filter((f) => isSecurity(f) && !["fixed", "dismissed"].includes(fd.status?.[f.id]?.s)); // as the review's ⛨
+        out.set(pr.url, triageOf({ pr, analysis, size: files && { files: files.length, lines: files.reduce((n, f) => n + f.add + f.del, 0) },
           security, related: ctx, llm: llm[pr.url] ?? null }));
-      }));
-      this.triage = out; cx.notify();
+      }).map((one) => one.catch(() => null))); // a broken cache file costs that row its chips, not the whole list
+      this.triage = out; this.risk = risk; cx.notify();
     });
   }
 
@@ -761,30 +807,57 @@ export default class PrReview extends View {
     cx.notify();
   }
 
+  // A PR row's risk signal as chips (views.js riskSignal): the highest severity among its open findings, and
+  // security's own mark. Nothing without a cached analysis or findings file.
+  riskChips(t, url, id) {
+    // One mark (views.js rowMarks): "⛨ high" in red when an open finding is about security, else the severity in grey.
+    return rowMarks(this.risk?.get(url), null).map((m) => chip(t, m.text, m.security ? t.ansi1 : t.muted, m.security, `${id}-sev`,
+      `The highest severity among this PR's open findings, from the cached analysis and reviews${m.security ? `; ${SEC_MARK}: at least one of them is about security` : ""}`));
+  }
+
+  // The list of the shown source, one row per PR: the ones under "In progress" are not repeated, open PRs come first
+  // with one way into the review each (Resume once started), merged and closed ones are folded under their own row.
   picker(t) {
-    const src = this.sourceNow(), list = this.listNow(), sl = this.srcLists[src];
+    const src = this.sourceNow(), sl = this.srcLists[src], inProgress = (shared("review.open") ?? []).filter(shownIn);
+    const { list, above, started } = listRows(this.listNow(), inProgress, capped(inProgress, this.allOpen).shown), { open, done } = byState(list);
     const item = (id, on, top, sub, state, tag, click, pr) => v_flex().id(id).flex_none().px(8).py(4).rounded(7).cursor_pointer().tooltip(pr ? "Select this PR to see its diff" : "Use the diff of the focused pane's branch")
       .when(on, (e) => e.bg(t.selected)).hover((s) => s.bg(t.hover)).on_click(click)
-      .child(h_flex().gap(6).child(div().flex_1().min_w(0).truncate().child(top)).when(Boolean(state), (e) => e.child(div().id(`${id}-st`).tooltip(`PR state: ${state}`).flex_none().text_size(10.5).text_color(t[STATE[state]] ?? t.dim).child(state)))
-        .when(Boolean(pr), (e) => e.child(pill(`${id}-rv`, t, "Review", (_e, cx) => { cx.stop_propagation(); this.pickTarget(pr, cx, true); }, false, "Open this PR in the review layout"))))
-      .when(Boolean(sub), (e) => e.child(h_flex().gap(6).text_size(11).text_color(t.dim).child(div().id(`${id}-sub`).tooltip(src === "mine" ? "Repository and the session that opened it" : "Author, review status, lines added and removed, last update").flex_1().min_w(0).truncate().child(sub))
+      .child(h_flex().gap(6).child(div().flex_1().min_w(0).truncate().child(top)).when(Boolean(state), (e) => e.child(div().id(`${id}-st`).tooltip(`PR state: ${state}`).flex_none().text_size(10.5).text_color(t[STATE[state]] ?? t.muted).child(state)))
+        .when(Boolean(pr && isOpenPr(pr)), (e) => { // the one way into the review; a merged or closed PR has none
+          const r = started.get(pr.url);
+          return e.child(r ? pill(`${id}-rv`, t, "Resume", (_e, cx) => { cx.stop_propagation(); startReview(r.target ?? r); }, false, "Continue this review where you left it")
+            : pill(`${id}-rv`, t, "Review", (_e, cx) => { cx.stop_propagation(); this.pickTarget(pr, cx, true); }, false, "Open this PR in the review layout"));
+        }))
+      .when(Boolean(sub), (e) => e.child(h_flex().gap(6).text_size(11).text_color(t.muted).child(div().id(`${id}-sub`).tooltip(src === "mine" ? "Repository and the session that opened it" : "Author, review status, lines added and removed, last update").flex_1().min_w(0).truncate().child(sub))
         .when(Boolean(tag), (e) => e.child(div().id(`${id}-tg`).tooltip("Agent that opened this PR").flex_none().max_w(140).truncate().px(5).rounded(4).bg(t.raised).text_size(10).child(tag)))))
-      .when(Boolean(pr && this.triage?.get(pr.url)), (e) => { // the triage card: compact; the why shows on the picked PR
-        const tri = this.triage.get(pr.url);
-        return e.child(h_flex().flex_wrap().gap(4).pt(2).child(chip(t, `● P${tri.priority}`, tri.priority === 1 ? t.ansi1 : tri.priority === 2 ? t.ansi3 : t.muted, false, `${id}-pri`, PRIORITY_TIP))
-          .children(tri.chips.map((c, k) => chip(t, c, /security/i.test(c) ? t.ansi1 : t.muted, false, `${id}-tc${k}`, triageTip(c)))))
-          .when(on && Boolean(tri.why), (e) => e.child(div().mt(3).pl(8).border_l(3).border_color(t.accent).text_size(11.5).line_height(1.4).whitespace_normal().text_color(t.foreground).child(tri.why)));
+      .when(Boolean(pr && (this.triage?.get(pr.url) || this.risk?.get(pr.url)?.top)), (e) => { // risk first, then the triage card: compact; the why shows on the picked PR
+        const tri = this.triage?.get(pr.url);
+        // At most three marks (views.js rowMarks): severity with ⛨, then priority and type as plain text.
+        const marks = rowMarks(this.risk?.get(pr.url), tri);
+        return e.child(h_flex().gap(8).pt(2).items_center().children(this.riskChips(t, pr.url, id))
+          .children(marks.filter((m) => m.kind !== "risk").map((m) => div().id(`${id}-${m.kind}`).tooltip(m.kind === "priority" ? PRIORITY_TIP : "The kind of change, from the PR title")
+            .text_size(11).text_color(m.kind === "priority" && tri.priority === 1 ? t.foreground : t.muted).child(m.text))))
+          .when(on && Boolean(tri?.why), (e) => e.child(div().mt(3).pl(8).border_l(3).border_color(t.accent).text_size(11.5).line_height(1.4).whitespace_normal().text_color(t.foreground).child(tri.why)));
       });
     // A PR you didn't open: author, draft, review decision, +/−, age; its repo for review requests.
     const other = (p) => [src === "review" ? p.repo : null, p.author ? `@${p.author}` : null, REVIEW[p.review]?.[0],
       p.add != null ? `+${p.add} −${p.del}` : null, p.updatedAt ? age(p.updatedAt) : null].filter(Boolean).join(" · ");
+    const row = (p) => (src === "mine"
+      ? item(`pick-${p.url}`, this.prSel?.url === p.url, `#${p.number} ${p.title ?? ""}`,
+        `${p.repo.split("/").pop()} · ${p.sessionTitle ?? p.session.slice(0, 8)}`, p.state, p.agent && `↳ ${p.agent}`, (_e, cx) => this.choose(p, cx), p)
+      : item(`pick-${src}-${p.url}`, this.prSel?.url === p.url, `#${p.number} ${p.title ?? ""}`, other(p), p.state, null, (_e, cx) => this.pickTarget(p, cx), p));
+    const inView = C.tagged(ctxDoc()) ? " (in this view)" : "", n = open.filter((p) => this.triage?.has(p.url)).length; // triaged rows of this list
+    // One sentence for an empty list: what is going on, or what to do.
+    const empty = src === "mine" ? (this.scanning ? "Searching transcripts for PRs…" : "No PRs from Claude sessions") : sl?.loading ? "Asking GitHub…"
+      : src === "repo" && sl?.key === null ? "Open a space on a GitHub repo to list its PRs."
+      : above ? "Every open PR here is in progress above." : src === "repo" ? `No open PRs in this repo${inView}` : `No open review requests${inView}`;
     return v_flex().flex_none().p(6)
         .child(h_flex().flex_none().px(4).py(2).gap(6).items_center()
           .child(h_flex().gap(2).p(2).rounded(7).border_1().border_color(t.border).children(SOURCES.map(([k, label]) =>
             div().id(`pr-src-${k}-${this.uid}`).tooltip(SRC_TIP[k]).px(8).h(22).flex().items_center().rounded(5).cursor_pointer().text_size(11.5)
               .bg(src === k ? t.selected : t.chrome).text_color(src === k ? t.foreground : t.muted)
               .on_click((_e, cx) => { setShared("pr.source", k); this.loadSource(cx); cx.notify(); }).child(label))))
-          .child(div().id(`pr-srcinfo-${this.uid}`).tooltip(src === "repo" ? "Repository these PRs come from" : "How long ago this list was fetched from GitHub").flex_1().min_w(0).truncate().text_size(10.5).text_color(t.dim)
+          .child(div().id(`pr-srcinfo-${this.uid}`).tooltip(src === "repo" ? "Repository these PRs come from" : "How long ago this list was fetched from GitHub").flex_1().min_w(0).truncate().text_size(10.5).text_color(t.muted)
             .child(src === "repo" ? this.spaceSlug?.slug ?? "" : sl?.loading ? "loading…" : sl?.at ? `${age(new Date(sl.at).toISOString())} ago` : ""))
           .when(src !== "mine", (e) => e.child(pill(`pr-src-reload-${this.uid}`, t, sl?.loading ? "…" : "↻", (_e, cx) => this.loadSource(cx, true), false, "Fetch this list from GitHub again", "Reload PR list"))))
         .child(h_flex().flex_none().px(4).py(2).gap(6).items_center()
@@ -792,17 +865,18 @@ export default class PrReview extends View {
             .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Input.new(this.openRefInput).h_full().text_size(11.5).text_color(t.foreground)))
           .child(pill(`pr-openref-go-${this.uid}`, t, "Open", (_e, cx) => this.openRef(cx), false, "Open the PR typed on the left")))
         .when(Boolean(sl?.error) && src !== "mine", (e) => e.child(div().px(8).py(4).text_size(11).text_color(t.ansi1).whitespace_normal().child(sl.error)))
+        // The triage line only says something when PRs were triaged; without any, only Setup is left of it.
         .child(h_flex().flex_none().px(8).py(4).gap(6).items_center()
-          .child(div().id(`pr-triage-info-${this.uid}`).tooltip("Priority and chips come from cached data; no GitHub or AI call").flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(this.triage?.size ? `${this.triage.size} open PRs triaged from cached data` : "Triage: loading…"))
-          .child(pill(`pr-triage-${this.uid}`, t, this.triaging ? "Triaging…" : "Triage PRs", (_e, cx) => this.runTriage(cx), false, "Rank the listed open PRs with one small AI call per context"))
+          .child(div().id(`pr-triage-info-${this.uid}`).tooltip("Priority and chips come from cached data; no GitHub or AI call").flex_1().min_w(0).truncate().text_size(11).text_color(t.muted).child(n ? `${n} open ${n === 1 ? "PR" : "PRs"} triaged from cached data` : ""))
+          .when(n > 0, (e) => e.child(pill(`pr-triage-${this.uid}`, t, this.triaging ? "Triaging…" : "Triage PRs", (_e, cx) => this.runTriage(cx), false, "Rank the listed open PRs with one small AI call per context")))
           .child(pill(`pr-setup-${this.uid}`, t, "Setup", (_e, cx) => { this.picking = false; this.view = "setup"; runSetup(this, cx, false); cx.notify(); }, false, "Check which programs this mod needs are installed")))
         .child(item("pick-branch", Boolean(this.branchPicked && !this.prSel), "Current branch", "Diff of the focused pane", null, null, (_e, cx) => this.choose(null, cx)))
-        .children(list.map((p) => (src === "mine"
-          ? item(`pick-${p.url}`, this.prSel?.url === p.url, `#${p.number} ${p.title ?? ""}`,
-            `${p.repo.split("/").pop()} · ${p.sessionTitle ?? p.session.slice(0, 8)}`, p.state, p.agent && `↳ ${p.agent}`, (_e, cx) => this.choose(p, cx), p)
-          : item(`pick-${src}-${p.url}`, this.prSel?.url === p.url, `#${p.number} ${p.title ?? ""}`, other(p), p.state, null, (_e, cx) => this.pickTarget(p, cx), p))))
-        .when(!list.length, (e) => e.child(div().p(8).text_color(t.dim).child(src === "mine" ? (this.scanning ? "Searching transcripts for PRs…" : "No PRs from Claude sessions")
-          : sl?.loading ? "Asking GitHub…" : src === "repo" ? `No open PRs in this repo${C.tagged(ctxDoc()) ? " (in this view)" : ""}` : `No open review requests${C.tagged(ctxDoc()) ? " (in this view)" : ""}`)));
+        .children(open.map(row))
+        .when(done.length > 0, (e) => e.child(h_flex().id(`pr-done-${this.uid}`).flex_none().mt(4).px(8).h(24).gap(6).items_center().rounded(6).cursor_pointer().text_size(11.5).text_color(t.muted)
+          .tooltip(this.showDone ? "Hide the merged and closed PRs" : "Show the merged and closed PRs").hover((s) => s.bg(t.hover).text_color(t.foreground))
+          .on_click((_e, cx) => { this.showDone = !this.showDone; cx.notify(); }).child(div().w(10).flex_none().child(this.showDone ? "▾" : "▸")).child(`Merged or closed (${done.length})`)))
+        .when(done.length > 0 && Boolean(this.showDone), (e) => e.children(done.map(row)))
+        .when(!list.length, (e) => e.child(div().p(8).whitespace_normal().text_color(t.muted).child(empty)));
   }
 
   diffRow(row, i, t, plain = false) {
@@ -835,24 +909,28 @@ export default class PrReview extends View {
   }
 
   // Reviews started and not done (shared "review.open", written by the review layout): Resume goes back to exactly
-  // where it was. Only the contexts the view shows, each tagged when there are several.
+  // where it was, a click on the row shows the PR's diff here like a row of the list. Under the title the risk signal
+  // and the progress, wrapped; when it was last touched is in the row's tooltip. Only the contexts the view shows,
+  // each tagged when there are several.
   openReviews(t) {
     const ago = (ms) => { const m = Math.round((Date.now() - ms) / 60000); return m < 60 ? `${m} min ago` : m < 2880 ? `${Math.round(m / 60)} h ago` : `${Math.round(m / 1440)} d ago`; };
     const list = (shared("review.open") ?? []).filter(shownIn), { shown, more } = capped(list, this.allOpen);
     return v_flex().flex_none().px(10).pt(8).pb(4).gap(2).border_b(1).border_color(t.border)
       .child(h_flex().px(4).gap(8).items_center().child(div().flex_1().text_size(11).font_semibold().text_color(t.muted).child("In progress"))
         .when(Boolean(this.allOpen) && list.length > IN_PROGRESS_MAX, (e) => e.child(pill(`pr-open-less-${this.uid}`, t, "Show fewer", (_e, cx) => { this.allOpen = false; cx.notify(); }, false, "Show only the most recent reviews"))))
-      .children(shown.map((r) => h_flex().id(`pr-open-${r.url}`).gap(8).px(4).py(3).rounded(6).items_center().hover((s) => s.bg(t.hover))
-        .child(v_flex().flex_1().min_w(0)
+      .children(shown.map((r) => [r, this.riskChips(t, r.url, `pr-open-${r.url}`)]).map(([r, risk]) => h_flex().id(`pr-open-${r.url}`).gap(8).px(4).py(3).rounded(6).items_start().cursor_pointer().tooltip(`Select this PR to see its diff. Last touched ${ago(r.lastTouched)}.`)
+        .when(this.prSel?.url === r.url, (e) => e.bg(t.selected)).hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.pickTarget(r.target ?? r, cx))
+        .child(v_flex().flex_1().min_w(0).gap(2)
           .child(div().truncate().text_size(12.5).child(`#${r.number} ${r.title ?? ""}`))
-          .child(div().truncate().text_size(11).text_color(t.muted).child([r.status === "sent" ? "sent" : null, progressLine(r.progress), ago(r.lastTouched)].filter(Boolean).join(" · "))))
+          .when(risk.length > 0, (e) => e.child(h_flex().flex_wrap().gap(4).children(risk)))
+          .child(div().whitespace_normal().text_size(11).text_color(t.muted).child([r.status === "sent" ? "sent" : null, progressText(r.progress)].filter(Boolean).join(" · "))))
         .when(C.tagged(ctxDoc()), (e) => e.child(ctxTag(t, prCtx(r), r.url)))
-        .child(pill(`pr-resume-${r.url}`, t, "Resume", () => startReview(r.target ?? r), false, "Continue this review where you left it"))))
+        .child(pill(`pr-resume-${r.url}`, t, "Resume", (_e, cx) => { cx.stop_propagation(); startReview(r.target ?? r); }, false, "Continue this review where you left it"))))
       .when(more > 0, (e) => e.child(div().id(`pr-open-all-${this.uid}`).px(4).py(3).text_size(11.5).text_color(t.accent).cursor_pointer().tooltip("List every review in progress")
         .hover((s) => s.text_color(t.foreground)).on_click((_e, cx) => { this.allOpen = true; cx.notify(); }).child(`Show all (${list.length})`)));
   }
 
-  // The current branch's PR as a review target: no session, so "Send review" goes to this space's agent.
+  // The current branch's PR as a review target: no session, so what is sent goes to this space's agent.
   branchTarget() {
     const repo = /github\.com\/([^/]+\/[^/]+)\/pull/.exec(this.pr.url)?.[1];
     return { url: this.pr.url, number: this.pr.number, title: this.pr.title, repo, state: "open", base: this.pr.baseRefName,
@@ -896,12 +974,20 @@ export default class PrReview extends View {
     if (this.part === "review") {
       // Go to hands PRs over through "pr.goto"; the panel isn't mounted while the review layout shows, so take it here.
       if (shared("pr.goto")?.url && !this.gotoQueued) { this.gotoQueued = true; cx.timer.after(0, (cx) => { this.gotoQueued = false; this.takeGoto(cx); }); }
+      // The panel's "Finish your review" hands over through "pr.finish" ({url, at}): once that PR's comments are
+      // loaded here, the popover opens (the "finish" command, a toggle). A stale or foreign one is dropped.
+      const fin = shared("pr.finish");
+      if (fin && !this.finishQueued && (this.reviewKey === fin.url || Date.now() - fin.at > 60000)) {
+        this.finishQueued = true;
+        cx.timer.after(0, (cx) => { this.finishQueued = false; setShared("pr.finish", null); if (this.reviewKey === fin.url && !this.finishOpen) { this.command("finish", cx); cx.notify(); } });
+      }
       return this.renderReview(cx);
     }
     if (this.view === "walk" && this.walkModel && walkModel() !== this.walkModel && !this.walkBusy) this.openWalk(cx, false); // picker changed: that model's cache
     // Go to: a handed-over PR (outside render), and the reviews-in-progress items when that list changes.
     if (shared("pr.goto")?.url && !this.gotoQueued) { this.gotoQueued = true; cx.timer.after(0, (cx) => { this.gotoQueued = false; this.takeGoto(cx); }); }
     if (shared("review.open") !== this.gotoOpen) { this.gotoOpen = shared("review.open"); cx.timer.after(0, () => this.publishGoto()); }
+    if (!this.scanQueued && visible() && windowActive() && Date.now() - (this.scanAt ?? 0) >= PRS_MS) { this.scanQueued = true; cx.timer.after(0, (cx) => { this.scanQueued = false; this.scanIfDue(cx); }); }
     // The selection is never dropped here: a PR the view hides gets a banner instead.
     // refresh() notifies, which render may not: queue it once, right after this render.
     if (!this.refreshQueued && visible() && (this.key() !== this.context || (!this.prSel && this.root && this.dirty.has(this.root)))) {
@@ -927,15 +1013,18 @@ export default class PrReview extends View {
     const tab = bodyTab(this.view), chosen = this.prSel ? "PR" : "branch";
     if (state === "picking" && !this.srcAsked) { this.srcAsked = true; cx.timer.after(0, (cx) => this.loadSource(cx)); } // the list, once, after this render
     const back = (_e, cx) => { this.picking = true; this.loadSource(cx); cx.notify(); };
+    const resume = this.pr?.url ? (shared("review.open") ?? []).find((r) => r.url === this.pr.url) : null; // this PR's review in progress
     // The header: picking shows the list's title (and the way back to the chosen PR); a chosen PR its title and actions.
     const header = state === "selected"
-      ? h_flex().h(42).flex_none().pl(8).pr(10).gap(6).items_center().border_b(1).border_color(t.border)
+      ? h_flex().min_h(42).flex_none().pl(8).pr(10).py(5).gap(6).items_center().border_b(1).border_color(t.border)
         .child(div().id(`pr-back-${this.uid}`).flex_none().w(26).h(26).flex().items_center().justify_center().rounded(6).cursor_pointer().text_color(t.muted)
           .hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip("All PRs").on_click(back).child("←"))
-        .child(div().flex_1().min_w(0).truncate().font_semibold().child(title))
+        .child(div().id(`pr-title-${this.uid}`).tooltip(title).flex_1().min_w(0).max_h(36).overflow_hidden().whitespace_normal().line_height(1.35).font_semibold().child(title)) // two lines, then cut
         .child(pill(`pr-reload-${this.uid}`, t, this.loading ? "…" : "↻", (_e, cx) => { if (this.prSel) this.heads.delete(this.prSel.url); this.refresh(cx, true); }, false, "Reload this PR's diff and details", "Reload PR"))
-        .when(Boolean(this.pr?.url), (e) => e.child(pill(`pr-rv-${this.uid}`, t, "Review", () => startReview(this.prSel ?? this.branchTarget()), false, "Open this PR in the review layout")))
         .when(Boolean(this.pr), (e) => e.child(pill("pr-web", t, "GitHub ↗", () => openUrl(this.pr.url), false, "Open this PR on GitHub in the browser")))
+        // The way into the review is the header's one filled button; Resume once this PR's review was started.
+        .when(Boolean(this.pr?.url), (e) => e.child(div().id(`pr-rv-${this.uid}`).tooltip(resume ? "Continue this review where you left it" : "Open this PR in the review layout").flex_none().px(12).h(26).flex().items_center().rounded(6)
+          .text_size(12).font_semibold().bg(t.solid).text_color(t.solid_foreground).cursor_pointer().on_click(() => startReview(resume?.target ?? this.prSel ?? this.branchTarget())).child(resume ? "Resume" : "Review")))
       : h_flex().h(42).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
         .child(div().flex_1().min_w(0).truncate().font_semibold().child(state === "setup" ? "Setup" : "Pull requests"))
         .when(state === "picking", (e) => e.child(pill(`pr-explore-${this.uid}`, t, "Explore a topic…", () => startExplore(location().cwd ?? null), false, "Ask about a topic in this repo's code, in the review layout")))
@@ -1007,12 +1096,14 @@ export default class PrReview extends View {
         .when(tab === "walk", (e) => e.child(this.walkView(t)))
         .when(tab === "diff", (e) => e.child(files).child(diffBody)))
       .when(Boolean(this.note), (e) => e.child(div().flex_none().px(10).pt(6).text_size(11).whitespace_normal().text_color(/Could not|Not sent|Not a PR/.test(this.note ?? "") ? t.ansi1 : t.dim).child(this.note)))
+      // The pending comments: a count, not a main button. For a PR it opens the review's "Finish your review" (post to
+      // GitHub or send to an agent, after a preview); a branch without a PR has no review, so its comments go to the agent.
       .when(state === "selected" && this.comments.length > 0, (e) => e.child(h_flex().flex_none().m(8).px(10).h(32).gap(8).items_center().rounded(8).bg(t.surface).border_1().border_color(t.border)
-        .child(div().flex_1().min_w(0).truncate().text_size(12).child(`Review: ${this.comments.length} ${this.comments.length === 1 ? "comment" : "comments"}`
-          + ` in ${new Set(this.comments.map((c) => c.file)).size} ${new Set(this.comments.map((c) => c.file)).size === 1 ? "file" : "files"}`))
+        .child(div().flex_1().min_w(0).truncate().text_size(12).child(pendingText(this.comments)))
         .child(pill(`rv-drop-${this.uid}`, t, "Discard", (_e, cx) => { this.comments = []; this.persist(cx); cx.notify(); }, false, "Delete all pending comments without sending them"))
-        .child(div().id(`rv-send-${this.uid}`).tooltip("Send all pending comments to the coding agent as one prompt").flex_none().px(10).h(22).flex().items_center().rounded(6).text_size(11.5).bg(canSend ? t.solid : t.raised).text_color(canSend ? t.solid_foreground : t.dim)
-          .when(canSend, (e) => e.cursor_pointer()).on_click((_e, cx) => this.sendReview(cx)).child(this.sending ? "…" : "Send review"))));
+        .child(this.pr?.url
+          ? pill(`rv-finish-${this.uid}`, t, "Finish your review", () => this.finishReview(), false, "Open the review with a preview of these comments, then post them to GitHub or send them to an agent")
+          : pill(`rv-send-${this.uid}`, t, this.sending ? "…" : "Send to agent", (_e, cx) => { if (canSend) this.sendReview(cx); }, false, "Send all pending comments to the coding agent as one prompt"))));
   }
 
   // The inline composer (GitHub style, one at a time): where it points, the presets, the field, Cancel / Comment / Ask.

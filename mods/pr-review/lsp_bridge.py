@@ -2,7 +2,7 @@
 """LSP bridge for the pr-review mod: one small HTTP server per user that keeps language servers warm.
 
   lsp_bridge.py start              start the bridge unless one runs; prints {"port", "token"}
-  lsp_bridge.py serve              run in the foreground (what `start` launches)
+  lsp_bridge.py serve [--owner P]  run in the foreground (what `start` launches); exits once process P is gone
   lsp_bridge.py call /hover JSON   one request through the bridge (fallback for clients without HTTP)
   lsp_bridge.py stop
   lsp_bridge.py forget ROOT        stop ROOT's language servers and delete their index dirs (worktree removal)
@@ -13,7 +13,9 @@ mode 0600). POST /definition, /hover {root, path, line (1-based), character (UTF
 POST /contents {root, uri}: text of a file or jdt:// class a definition pointed at; POST /status; GET /health.
 Language servers start per (root, language) on demand, over stdio, with the user's environment; they read the real
 files under `root`, so `root` must be a checkout at the reviewed revision. No command or path comes from the client:
-servers are a fixed table, and request paths must resolve inside `root`. Exits after IDLE seconds without requests.
+servers are a fixed table, and request paths must resolve inside `root`. Exits after IDLE seconds without requests,
+and once the process that started it (Herdr, which runs `start` through exec) is gone: it is detached from Herdr's
+session, so quitting Herdr would otherwise leave it and its language servers running until IDLE.
 """
 import fcntl, hashlib, hmac, json, os, secrets, shutil, subprocess, sys, threading, time, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -24,6 +26,7 @@ STATE = os.path.join(DATA, "lsp-bridge.json")
 LOCK = os.path.join(DATA, "lsp-bridge.lock")
 LOG = os.path.join(DATA, "lsp-bridge.log")
 IDLE = float(os.environ.get("LSP_BRIDGE_IDLE", 20 * 60))
+OWNER_CHECK = float(os.environ.get("LSP_BRIDGE_OWNER_CHECK", 5))  # seconds between looks at the owner process
 TIMEOUT = float(os.environ.get("LSP_BRIDGE_TIMEOUT", 5))
 PATH_EXTRA = ["/opt/homebrew/bin", "/usr/local/bin", os.path.expanduser("~/.cargo/bin"), os.path.expanduser("~/go/bin")]
 
@@ -617,7 +620,18 @@ def write_private(path, text):
     os.replace(path + ".tmp", path)
 
 
-def serve():
+def alive(pid):
+    """Whether process pid exists. ponytail: a pid reused by another process within OWNER_CHECK keeps the bridge until IDLE."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def serve(owner=None):
     os.makedirs(DATA, exist_ok=True)
     sys.stderr = CappedLog(LOG)
     lock = open(LOCK, "a")
@@ -643,6 +657,14 @@ def serve():
                 httpd.shutdown()
                 return
     threading.Thread(target=idle, daemon=True).start()
+
+    def orphaned():
+        while alive(owner):
+            time.sleep(OWNER_CHECK)
+        log(f"owner {owner} is gone, shutting down")
+        httpd.shutdown()
+    if owner:
+        threading.Thread(target=orphaned, daemon=True).start()
     try:
         httpd.serve_forever()
     finally:
@@ -676,7 +698,8 @@ def start():
     if not st:
         os.makedirs(DATA, exist_ok=True)
         old = os.path.getmtime(STATE) if os.path.exists(STATE) else 0
-        subprocess.Popen([sys.executable, os.path.abspath(__file__), "serve"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        # The owner: whoever ran `start` (Herdr's exec, also through `call`); the bridge goes when it does.
+        subprocess.Popen([sys.executable, os.path.abspath(__file__), "serve", "--owner", str(os.getppid())], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
         for _ in range(100):
             time.sleep(0.05)
@@ -692,7 +715,7 @@ def start():
 def main(argv):
     cmd = argv[1] if len(argv) > 1 else "start"
     if cmd == "serve":
-        return serve()
+        return serve(int(argv[3]) if argv[2:3] == ["--owner"] and len(argv) > 3 else None)
     if cmd == "start":
         return start()
     if cmd == "stop":

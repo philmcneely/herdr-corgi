@@ -78,3 +78,21 @@ assert post("/contents", {"root": root, "uri": "file:///etc/hosts"}, ok)[0] == 4
 time.sleep(10)
 assert not os.path.exists(state), "bridge should exit after idling"
 print("lsp_bridge ok")
+
+# The bridge goes with the process that started it (Herdr): `start` names its parent as the owner.
+home = tempfile.mkdtemp()
+env = {**os.environ, "HERDR_APP_HOME": home, "LSP_BRIDGE_OWNER_CHECK": "0.5"}
+herdr = subprocess.Popen([sys.executable, "-c", "import subprocess, sys; subprocess.run([sys.executable, sys.argv[1], 'start']); import time; time.sleep(60)",
+                          os.path.join(HERE, "lsp_bridge.py")], env=env, stdout=subprocess.DEVNULL)
+state = os.path.join(home, "pr-data", "lsp-bridge.json")
+for _ in range(100):
+    if os.path.exists(state): break
+    time.sleep(0.1)
+pid = json.load(open(state))["pid"]
+assert b.alive(pid)
+herdr.kill(); herdr.wait()
+for _ in range(60):
+    if not b.alive(pid): break
+    time.sleep(0.1)
+assert not b.alive(pid) and not os.path.exists(state), "bridge should exit once its owner is gone"
+print("lsp_bridge owner ok")

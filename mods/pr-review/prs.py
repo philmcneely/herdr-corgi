@@ -16,6 +16,7 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -29,6 +30,7 @@ UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
 CLOSED_RECHECK = 7 * 86400  # merged/closed PRs barely change
 CACHE = DATA / "cache"
 CACHE_FILES, CACHE_BYTES, CLOSED_KEEP = 200, 50 << 20, 14 * 86400
+RUN_KEEP, STALE_KEEP = 86400, 30 * 86400  # an analysis' run folder (its hunks as patches); findings/replies untouched this long
 
 
 def context_for(folder, remote, rules):
@@ -64,6 +66,26 @@ def prune_cache(closed_urls=()):
         total += sum(p.stat().st_size for p in ps)
         if i >= CACHE_FILES or total > CACHE_BYTES or any(h in name for h in gone):
             for p in ps:
+                p.unlink(missing_ok=True)
+    # review.py's <out>.run folders (every hunk as a patch for the model) are only read while that run lasts.
+    now = time.time()
+    for p in CACHE.iterdir():
+        if p.is_dir() and p.name.endswith(".run") and (now - p.stat().st_mtime > RUN_KEEP or any(h in p.name for h in gone)):
+            shutil.rmtree(p, ignore_errors=True)
+    prune_data(gone, now)
+
+
+def prune_data(gone, now):
+    """pr-data/findings/<hash>.json(l) (reviewer findings, statuses, fix reports) and replies/<hash>.jsonl (the agents'
+    answers): a PR's files go once it is merged/closed for CLOSED_KEEP (gone), or untouched for STALE_KEEP, unless the
+    person still needs them: a review not done (open-reviews.json), pending comments (reviews.json), sent threads."""
+    keep = {fnv(r["url"]) for r in load("open-reviews.json", []) or [] if isinstance(r, dict) and r.get("url") and r.get("status") != "done"}
+    keep |= {fnv(k) for k, v in (load("reviews.json", {}) or {}).items() if v}
+    keep |= {fnv(k) for k in load("threads.json", {}) or {}}
+    for d in (DATA / "findings", DATA / "replies"):
+        for p in d.iterdir() if d.is_dir() else ():
+            h = p.name.split(".")[0]
+            if p.is_file() and h not in keep and (h in gone or now - p.stat().st_mtime > STALE_KEEP):
                 p.unlink(missing_ok=True)
 
 

@@ -11,6 +11,7 @@ import os
 import pathlib
 import sys
 
+sys.dont_write_bytecode = True  # a .pyc written into the mod's folder reloads the mod: the view waiting for this run is gone
 import llm  # noqa: E402  (this folder)
 
 FEATURE, MAX = "PR triage", 200

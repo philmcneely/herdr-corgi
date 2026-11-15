@@ -44,7 +44,7 @@ assert prs.fnv("") == "811c9dc5" and prs.fnv("a") == "e40c292c"
 print("ok")
 
 # prune: a big diff's index and parts are one unit (counted once, dropped together)
-import os, pathlib, tempfile
+import os, pathlib, tempfile, time
 with tempfile.TemporaryDirectory() as d:
     prs.CACHE, prs.CACHE_FILES = pathlib.Path(d), 2
     for n in ["diff-aa-h1.json", "diff-aa-h1.0.txt", "diff-aa-h1.1.txt", "diff-bb-h2.json", "other.json"]:
@@ -53,3 +53,27 @@ with tempfile.TemporaryDirectory() as d:
         os.utime(prs.CACHE / n, (t, t))
     prs.prune_cache()
     assert sorted(p.name for p in prs.CACHE.iterdir()) == ["diff-aa-h1.0.txt", "diff-aa-h1.1.txt", "diff-aa-h1.json", "other.json"]
+
+# prune: a run folder older than RUN_KEEP goes; findings/replies of a gone or stale PR go unless a review, pending
+# comments or threads still need them.
+with tempfile.TemporaryDirectory() as d:
+    prs.DATA = pathlib.Path(d); prs.CACHE = prs.DATA / "cache"
+    for sub in ("cache/rv-aa-s.run", "cache/rv-bb-s.run", "findings", "replies"):
+        (prs.DATA / sub).mkdir(parents=True)
+    old = time.time() - 40 * 86400
+    os.utime(prs.DATA / "cache/rv-aa-s.run", (old, old))
+    urls = {k: f"https://github.com/o/r/pull/{k}" for k in (1, 2, 3, 4, 5)}
+    for k, u in urls.items():
+        for n in (f"findings/{prs.fnv(u)}.json", f"replies/{prs.fnv(u)}.jsonl"):
+            (prs.DATA / n).write_text("{}")
+            if k != 5: os.utime(prs.DATA / n, (old, old))  # 5: fresh
+    (prs.DATA / "open-reviews.json").write_text(json.dumps([{"url": urls[1], "status": "in-progress"}, {"url": urls[4], "status": "done"}]))
+    (prs.DATA / "reviews.json").write_text(json.dumps({urls[2]: [{"text": "x"}]}))
+    (prs.DATA / "threads.json").write_text(json.dumps({urls[3]: {"at": 1, "threads": []}}))
+    prs.prune_cache()
+    left = sorted(p.name for p in (prs.DATA / "findings").iterdir())
+    assert left == sorted(f"{prs.fnv(urls[k])}.json" for k in (1, 2, 3, 5)), left  # 4: done and stale
+    assert [p.name for p in prs.CACHE.iterdir()] == ["rv-bb-s.run"]
+    prs.prune_cache([urls[5]])
+    assert f"{prs.fnv(urls[5])}.jsonl" not in [p.name for p in (prs.DATA / "replies").iterdir()]  # merged/closed long enough
+print("ok prune")

@@ -258,7 +258,7 @@ export function exploreAi(saved) {
 export function scopeLine(scope) {
   if (!scope?.files) return "";
   const passes = scope.passes > 1 ? ` · ${scope.passes} passes` : "";
-  return `Read ${scope.detailed} of ${scope.files} ${scope.files === 1 ? "file" : "files"} in detail${scope.skimmed ? `, ${scope.skimmed} skimmed${scope.why ? ` (${scope.why})` : ""}` : ""}${passes}`;
+  return `Read ${scope.detailed} of ${scope.files} ${scope.files === 1 ? "file" : "files"} in detail${scope.skimmed ? `, ${scope.skimmed} skimmed${scope.why && scope.why !== "skimmed" ? ` (${scope.why})` : ""}` : ""}${passes}`;
 }
 
 // ---- Explore's trust (Restricted Mode for language servers): only a github.com remote names a repo; a folder without

@@ -121,6 +121,7 @@ assert.deepEqual(ex.files.find((f) => f.path === "jobs/run.py").lines, [5, 6]);
 assert.equal(X.scopeLine({ files: 41, detailed: 38, skimmed: 3, why: "lockfiles" }), "Read 38 of 41 files in detail, 3 skimmed (lockfiles)");
 assert.equal(X.scopeLine({ files: 1, detailed: 1, skimmed: 0, passes: 1 }), "Read 1 of 1 file in detail");
 assert.equal(X.scopeLine({ files: 90, detailed: 80, skimmed: 10, passes: 4 }), "Read 80 of 90 files in detail, 10 skimmed · 4 passes");
+assert.equal(X.scopeLine({ files: 9, detailed: 6, skimmed: 3, why: "skimmed" }), "Read 6 of 9 files in detail, 3 skimmed"); // not "3 skimmed (skimmed)"
 assert.equal(X.scopeLine(null), "");
 console.log("explore ok");
 // ---- Explore's trust: no remote, a foreign host, your github.com repo
