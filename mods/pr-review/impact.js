@@ -18,10 +18,13 @@ export const MARKS = {
 };
 export const MARK_ORDER = ["outside", "untouched", "changed"];
 export const SIG = { glyph: "⚠", word: "signature changed, caller not" };
-// MAX_CARDS: past it the callers are summed up by file, then by changed function. ASK: changed symbols asked for
-// their references; FILES: caller files asked for their symbols; MS: the whole computation.
+// ASK: changed symbols asked for their references; FILES: caller files asked for their symbols; MS: the whole computation.
 export const MODEL_V = 2; // a kept result of another version is computed again (2: without infrastructure files)
-export const LIMITS = { MAX_CARDS: 40, ASK: 60, FILES: 80, MS: 90000 };
+export const LIMITS = { ASK: 60, FILES: 80, MS: 90000 };
+// More changed symbols, callers or calls than this, and a picture with lines no longer shows which caller belongs to
+// which symbol: the section is then a row per changed symbol with its callers by file (impactDense), what stands out
+// first. files: the files of one mark named in a row before "and n more".
+export const IMPACT_DENSE = { symbols: 12, callers: 12, calls: 15, files: 8 };
 
 const FUNC = new Set(["function", "method", "constructor"]), TYPES = new Set(["class", "interface", "struct", "enum"]);
 // What can be a changed symbol or a caller: functions, types, and a multi-line value (const f = () => …, a table).
@@ -226,57 +229,95 @@ export function impactLines(model) {
     : !T.callers ? `The language server found no caller of the changed ${n}${T.functions === 1 ? "" : "s"}${T.tests ? " outside the tests" : ""}.`
       : T.outside ? `${plural(T.outside, "caller")} of the changed code ${T.outside === 1 ? "is" : "are"} not in this PR.${T.risky ? ` ${T.risky === 1 ? "One caller keeps" : `${T.risky} callers keep`} an unchanged call to a ${n} whose signature changed.` : ""}`
         : `Every caller the language server found is in this PR's diff.${T.untouched ? ` ${T.untouched === 1 ? "One of them has" : `${T.untouched} of them have`} a call this PR does not touch.` : ""}${T.risky ? ` ${T.risky === 1 ? "One caller keeps" : `${T.risky} callers keep`} an unchanged call to a ${n} whose signature changed.` : ""}`;
-  const a = impactArch(model);
-  const summed = a.level > 0 || a.hidden ? `The picture sums up ${plural(a.callers, "caller")} in ${plural(a.nodes.filter((x) => x.group !== "changed").length, "card")}${a.hidden ? ` and leaves out ${plural(a.hidden, `changed ${n}`)}` : ""}; the list has every one.` : null;
-  return { title: "Impact", summed, counts: `${plural(T.functions, `changed ${n}`)}, ${plural(T.callers, "caller")}, ${plural(T.tests, "test")}`, source, lead, totals: T };
+  return { title: "Impact", dense: isDense(model) ? denseText() : null, counts: `${plural(T.functions, `changed ${n}`)}, ${plural(T.callers, "caller")}, ${plural(T.tests, "test")}`, source, lead, totals: T };
 }
 
 /**
  * The model as cards and calls for arch.js archLayout: the changed functions in one frame, their callers (tests
  * aside) in a frame per mark, a call from each caller to what it calls. A card has `rows` [{glyph, text, tip, tone}]
- * (drawn under its text; the layout keeps a line each) and `at` (path:line, the click's place).
- * More cards than max: the callers are summed up per file and mark; still more: per changed function and mark
- * ("12 callers in 3 files"); still more: only the first functions are drawn. -> {groups, nodes, edges, level: 0 | 1 |
- * 2, callers: how many callers the cards stand for, hidden: changed functions not drawn}
+ * (drawn under its text; the layout keeps a line each) and `at` (path:line, the click's place). Its place is its first
+ * row, the file's name with the line and never wrapped (the whole path is the row's tooltip): as the description a
+ * long path was broken in the middle of the file's name. Only for a model that is not dense (isDense): with many
+ * callers there is no picture, so nothing here sums cards up. -> {groups, nodes, edges}
  */
-export function impactArch(model, max = LIMITS.MAX_CARDS) {
-  const fns = model?.functions ?? [], build = (level, shown) => {
-    const centre = new Set(shown.map((f) => f.id)), buckets = new Map();
-    for (const fn of shown) for (const c of fn.callers) {
-      if (c.test || centre.has(c.id)) continue; // a changed function that calls another one is its own card
-      const key = level === 0 ? c.id : level === 1 ? `${c.path}|${c.mark}` : `${fn.id}|${c.mark}`;
-      const b = buckets.get(key) ?? { key, mark: c.mark, members: new Map(), to: new Set(), risky: false };
-      if (MARK_ORDER.indexOf(c.mark) < MARK_ORDER.indexOf(b.mark)) b.mark = c.mark;
-      b.members.set(c.id, c); b.to.add(fn.id); if (fn.sig && c.mark !== "changed") b.risky = true;
-      buckets.set(key, b);
-    }
-    const nodes = shown.map((fn) => ({ id: fn.id, label: fullName(fn), description: `${fn.path}:${fn.nameLine}`, group: "changed", status: fn.isNew ? "new" : "changed", type: fn.kind, at: `${fn.path}:${fn.nameLine}`,
-      rows: [fn.sig && { glyph: SIG.glyph, text: "signature changed", tone: "warn", tip: fn.sig.old ? `Before: ${fn.sig.old}\nNow: ${fn.sig.now}` : `Now: ${fn.sig.now}` },
-        { glyph: "", text: testsLine(fn), tone: "muted" },
-        !fn.callers.some((c) => !c.test) && { glyph: "", text: fn.callers.length ? "no other caller found" : "no caller found", tone: "muted" }].filter(Boolean) }));
-    const edges = [];
-    for (const fn of shown) for (const c of fn.callers) if (!c.test && centre.has(c.id) && c.id !== fn.id) edges.push({ from: c.id, to: fn.id });
-    for (const b of buckets.values()) {
-      const ms = [...b.members.values()], one = ms.length === 1 ? ms[0] : null, files = new Set(ms.map((c) => c.path)), first = ms[0];
-      const sites = one ? one.sites : [];
-      nodes.push({ id: `c:${b.key}`, group: `m:${b.mark}`, type: one ? one.kind : "callers", at: `${first.path}:${first.line}`,
-        label: one ? one.name ?? `${base(one.path)}, top level` : level === 1 ? `${plural(ms.length, "caller")} in ${base(first.path)}` : `${plural(ms.length, "caller")} in ${plural(files.size, "file")}`,
-        description: one ? `${one.path}:${one.line}${sites.length > 1 ? ` and ${plural(sites.length - 1, "more call")}` : ""}` : level === 1 ? first.path : [...files].slice(0, 2).map(base).join(", ") + (files.size > 2 ? `, and ${files.size - 2} more` : ""),
-        evidence: one ? sites.map((s) => `${s.line}: ${s.text}`).join("\n") : ms.slice(0, 12).map((c) => `${c.name ?? "top level"} (${c.path}:${c.line})`).join("\n"),
-        rows: [{ glyph: MARKS[b.mark].glyph, text: MARKS[b.mark].word, tone: b.mark === "outside" ? "strong" : "muted", mark: b.mark }, b.risky && { glyph: SIG.glyph, text: SIG.word, tone: "warn" }].filter(Boolean) });
-      for (const to of b.to) edges.push({ from: `c:${b.key}`, to });
-    }
-    const groups = [...MARK_ORDER.map((m) => ({ id: `m:${m}`, label: `${MARKS[m].glyph} ${MARKS[m].group}`, kind: String(nodes.filter((n) => n.group === `m:${m}`).length) })),
-      { id: "changed", label: `Changed ${noun(model)}s`, kind: String(shown.length) }];
-    return { groups, nodes, edges, level, callers: [...buckets.values()].reduce((s, b) => s + b.members.size, 0), hidden: fns.length - shown.length };
-  };
-  for (const level of [0, 1, 2]) { const a = build(level, fns); if (a.nodes.length <= max) return a; }
-  // More changed functions than the picture holds (a card each, and one per mark of its callers): those with callers
-  // outside the PR first, then with the most callers.
-  const real = (f) => f.callers.filter((c) => !c.test), weight = (f) => real(f).filter((c) => c.mark === "outside").length * 1000 + real(f).length, shown = [];
-  let cards = 0;
-  for (const f of [...fns].sort((a, b) => weight(b) - weight(a))) { const n = 1 + new Set(real(f).map((c) => c.mark)).size; if (cards + n > max && shown.length) break; cards += n; shown.push(f); }
-  return build(2, shown);
+export function impactArch(model) {
+  const fns = model?.functions ?? [], centre = new Set(fns.map((f) => f.id)), callers = new Map();
+  const place = (path, line, more = "") => ({ glyph: "", text: `${base(path)}:${line}${more}`, tone: "muted", tip: `${path}:${line}`, place: true });
+  for (const fn of fns) for (const c of fn.callers) {
+    if (c.test || centre.has(c.id)) continue; // a changed function that calls another one is its own card
+    const b = callers.get(c.id) ?? { c, mark: c.mark, to: new Set(), risky: false };
+    if (MARK_ORDER.indexOf(c.mark) < MARK_ORDER.indexOf(b.mark)) b.mark = c.mark;
+    b.to.add(fn.id); if (fn.sig && c.mark !== "changed") b.risky = true;
+    callers.set(c.id, b);
+  }
+  const nodes = fns.map((fn) => ({ id: fn.id, label: fullName(fn), description: "", group: "changed", status: fn.isNew ? "new" : "changed", type: fn.kind, at: `${fn.path}:${fn.nameLine}`,
+    rows: [place(fn.path, fn.nameLine), fn.sig && { glyph: SIG.glyph, text: "signature changed", tone: "warn", tip: fn.sig.old ? `Before: ${fn.sig.old}\nNow: ${fn.sig.now}` : `Now: ${fn.sig.now}` },
+      { glyph: "", text: testsLine(fn), tone: "muted" },
+      !fn.callers.some((c) => !c.test) && { glyph: "", text: fn.callers.length ? "no other caller found" : "no caller found", tone: "muted" }].filter(Boolean) }));
+  const edges = [];
+  for (const fn of fns) for (const c of fn.callers) if (!c.test && centre.has(c.id) && c.id !== fn.id) edges.push({ from: c.id, to: fn.id });
+  for (const { c, mark, to, risky } of callers.values()) {
+    nodes.push({ id: `c:${c.id}`, group: `m:${mark}`, type: c.kind, at: `${c.path}:${c.line}`, label: c.name ?? `${base(c.path)}, top level`, description: "",
+      evidence: c.sites.map((x) => `${x.line}: ${x.text}`).join("\n"),
+      rows: [place(c.path, c.line, c.sites.length > 1 ? ` and ${plural(c.sites.length - 1, "more call")}` : ""), { glyph: MARKS[mark].glyph, text: MARKS[mark].word, tone: mark === "outside" ? "strong" : "muted", mark }, risky && { glyph: SIG.glyph, text: SIG.word, tone: "warn" }].filter(Boolean) });
+    for (const id of to) edges.push({ from: `c:${c.id}`, to: id });
+  }
+  const groups = [...MARK_ORDER.map((m) => ({ id: `m:${m}`, label: `${MARKS[m].glyph} ${MARKS[m].group}`, kind: String(nodes.filter((n) => n.group === `m:${m}`).length) })),
+    { id: "changed", label: `Changed ${noun(model)}s`, kind: String(fns.length) }];
+  return { groups, nodes, edges };
+}
+
+// ---- many callers: a row per changed symbol instead of a picture
+
+/** The section is rows, not a picture: more changed symbols, callers or calls than a picture with lines can show. */
+export function isDense(model) {
+  const fns = model?.functions ?? [], centre = new Set(fns.map((f) => f.id)), callers = new Set();
+  let calls = 0;
+  for (const fn of fns) for (const c of fn.callers) { if (c.test || c.id === fn.id) continue; calls++; if (!centre.has(c.id)) callers.add(c.id); }
+  return fns.length > IMPACT_DENSE.symbols || callers.size > IMPACT_DENSE.callers || calls > IMPACT_DENSE.calls;
+}
+export const denseText = () => `More than ${IMPACT_DENSE.symbols} changed symbols, ${IMPACT_DENSE.callers} callers or ${IMPACT_DENSE.calls} calls: each changed symbol is a row with its callers by file, what stands out first, and no lines are drawn.`;
+/**
+ * The model for the rows: {symbols, rest, files: Map(caller file -> [{id: a symbol, n: its callers there}])}.
+ * symbols: what has a caller that may break or that is not in the PR, or a finding, in this order: a changed signature
+ * with a caller that did not change (the most such callers first), then a finding (the worst first), then the most
+ * callers outside the PR. A symbol: {id, name, kind, path, base, line, at, isNew, sig, mark: its findings or null,
+ * tests, risky: callers that keep an unchanged call to its changed signature, groups: {outside, untouched: {n, files:
+ * [{path, base, n, line: of its first caller, callers: [{name, line}]}] the most callers first}}, changed: callers
+ * changed in this PR}. rest: the other symbols (no caller outside the PR, nothing that stands out): {id, name, at,
+ * inPr: callers in the PR, tests}. Tests are counted, never callers here. Pure.
+ */
+export function impactDense(model, findings = []) {
+  const fns = model?.functions ?? [], marks = impactMarks(model, findings), files = new Map();
+  const rows = fns.map((fn) => {
+    const real = fn.callers.filter((c) => !c.test && c.id !== fn.id), group = (mark) => {
+      const by = new Map();
+      for (const c of real.filter((x) => x.mark === mark)) by.set(c.path, [...(by.get(c.path) ?? []), c]);
+      return { n: [...by.values()].reduce((k, l) => k + l.length, 0), files: [...by].map(([path, list]) => ({ path, base: base(path), n: list.length, line: list[0].line, callers: list.map((c) => ({ name: c.name ?? "top level", line: c.line })) }))
+        .sort((a, b) => b.n - a.n || a.path.localeCompare(b.path)) };
+    };
+    const groups = { outside: group("outside"), untouched: group("untouched") }, changed = real.filter((c) => c.mark === "changed").length;
+    return { id: fn.id, name: fullName(fn), kind: fn.kind, path: fn.path, base: base(fn.path), line: fn.nameLine, at: `${fn.path}:${fn.nameLine}`, isNew: Boolean(fn.isNew), sig: fn.sig ?? null, mark: marks.nodes.get(fn.id) ?? null,
+      tests: fn.callers.filter((c) => c.test).length, risky: fn.sig ? groups.outside.n + groups.untouched.n : 0, groups, changed };
+  });
+  const out = (r) => r.risky > 0 || r.mark || r.groups.outside.n > 0, rank = (r) => (r.risky ? 0 : r.mark ? 1 : 2);
+  const symbols = rows.filter(out).sort((a, b) => rank(a) - rank(b) || b.risky - a.risky || (SEV[a.mark?.severity] ?? 9) - (SEV[b.mark?.severity] ?? 9) || b.groups.outside.n - a.groups.outside.n || a.name.localeCompare(b.name));
+  for (const r of symbols) for (const g of [r.groups.outside, r.groups.untouched]) for (const f of g.files) files.set(f.path, [...(files.get(f.path) ?? []), { id: r.id, n: f.n }]);
+  return { symbols, rest: rows.filter((r) => !out(r)).map((r) => ({ id: r.id, name: r.name, at: r.at, inPr: r.groups.untouched.n + r.changed, tests: r.tests })), files, marks };
+}
+/** A symbol's row in words, for the Markdown and a tooltip: "signature changed, 5 callers keep the old call; 21 callers not in this PR in 9 files; …". */
+export function denseWords(r) {
+  const g = (x, word) => (x.n ? `${plural(x.n, "caller")} ${word} in ${plural(x.files.length, "file")}` : null);
+  return [r.sig && `signature changed${r.risky ? `, ${plural(r.risky, "caller")} ${r.risky === 1 ? "keeps" : "keep"} the old call` : ""}`, r.isNew && "added", g(r.groups.outside, MARKS.outside.word), g(r.groups.untouched, MARKS.untouched.word),
+    r.changed ? `${plural(r.changed, "caller")} ${MARKS.changed.word}` : null, r.tests ? plural(r.tests, "test") : "no test",
+    r.mark ? `${r.mark.severity}: ${r.mark.findings.map((f) => f.title).join("; ")}` : null].filter(Boolean).join("; ");
+}
+/** The other symbols in a sentence: "5 changed symbols have no caller outside this PR: a (3 in the PR), b, c." or "". */
+export const restText = (dense, model) => (dense.rest.length ? `${plural(dense.rest.length, `changed ${noun(model)}`)} ${dense.rest.length === 1 ? "has" : "have"} no caller outside this PR: ${dense.rest.map((r) => `${r.name}${r.inPr ? ` (${r.inPr} in the PR)` : ""}`).join(", ")}.` : "");
+/** A chosen caller file in words: "CartPage.tsx calls 3 of the changed symbols: a (2 callers), b, c." */
+export function denseFile(dense, path) {
+  const hit = dense.files.get(path) ?? [], name = new Map(dense.symbols.map((r) => [r.id, r.name]));
+  return hit.length ? `${base(path)} calls ${hit.length} of the changed symbols: ${hit.map((h) => `${name.get(h.id)}${h.n > 1 ? ` (${h.n} callers)` : ""}`).join(", ")}.` : "";
 }
 
 const sameFile = (a, b) => a === b || a.endsWith(`/${b}`) || b.endsWith(`/${a}`);
@@ -305,14 +346,15 @@ export function impactRows(model) {
 
 /** The section of the page's Markdown: {title, lines, head, rows (a table), flow (cards and calls for a flowchart)}. */
 export function impactDoc(model, findings = []) {
-  const L = impactLines(model), T = L.totals, a = impactArch(model), marks = impactMarks(model, findings);
+  const L = impactLines(model), T = L.totals, dense = L.dense ? impactDense(model, findings) : null, a = dense ? { groups: [], nodes: [], edges: [] } : impactArch(model), marks = impactMarks(model, findings);
   const fnCell = (fn) => `\`${fullName(fn)}\` (\`${fn.path}:${fn.nameLine}\`)${fn.isNew ? ", added" : ""}${fn.sig ? ", signature changed" : ""}, ${testsLine(fn)}${marks.nodes.get(fn.id) ? `, ${marks.nodes.get(fn.id).severity}: ${marks.nodes.get(fn.id).findings.map((f) => f.title).join("; ")}` : ""}`;
   return { title: `${L.title} (${L.counts})`,
     lines: [...L.source, "", L.lead, "",
       ...(T.callers ? [`Callers by mark: ${MARK_ORDER.map((m) => `${MARKS[m].word}: ${T[m]}`).join(" · ")}${T.risky ? ` · ${SIG.word}: ${T.risky}` : ""}.`, ""] : []),
-      ...(L.summed ? [L.summed, ""] : [])],
+      // Many callers: what the page's rows say, in the same order, and no flowchart (the table below has every caller).
+      ...(dense ? [L.dense, "", ...dense.symbols.map((r) => `- \`${r.name}\` (\`${r.at}\`): ${denseWords(r)}`), ...(dense.rest.length ? ["", restText(dense, model)] : []), ""] : [])],
     head: [`Changed ${noun(model)}`, "Caller", "File:line", "Mark"],
     rows: impactRows(model).map((r) => [fnCell(r.fn), r.caller ? `\`${r.name}\`` : r.name, r.at ? `\`${r.at}\`` : "", r.words]),
     flow: { groups: a.groups.map((g) => ({ id: g.id, label: g.label.replace(/^[◆◐○] /, "") })), edges: a.edges,
-      nodes: a.nodes.map((n) => ({ id: n.id, group: n.group, status: n.status, label: `${n.label} · ${n.description}${n.rows.length ? ` · ${n.rows.map((r) => r.text).join(" · ")}` : ""}` })) } };
+      nodes: a.nodes.map((n) => ({ id: n.id, group: n.group, status: n.status, label: [n.label, ...n.rows.map((r) => (r.place ? r.tip : r.text))].join(" · ") })) } };
 }

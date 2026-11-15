@@ -2,7 +2,7 @@
 // language server's answers, the cards and their summing up, the lines over the picture and the Markdown section)
 import assert from "node:assert/strict";
 import { readFileSync, existsSync } from "node:fs";
-import { fileChanges, symbolAt, changedSymbols, callersOf, computeImpact, impactTotals, impactLines, impactArch, impactMarks, impactRows, impactDoc, isTestPath, isImport, testsLine, MARKS, SIG, LIMITS } from "./impact.js";
+import { fileChanges, symbolAt, changedSymbols, callersOf, computeImpact, impactTotals, impactLines, impactArch, impactMarks, impactRows, impactDoc, isTestPath, isImport, testsLine, MARKS, SIG, LIMITS, IMPACT_DENSE, isDense, impactDense, denseWords, denseFile, denseText, restText } from "./impact.js";
 import { archLayout } from "./arch.js";
 import { diffRows, hunksOf, splitPatch } from "./pr.js";
 
@@ -114,15 +114,16 @@ assert.equal(wide[0].mark, "changed");
 
   // The cards: the changed functions in one frame, the callers in a frame per mark; tests are a line, not a card.
   const a = impactArch(m), by = new Map(a.nodes.map((n) => [n.id, n]));
-  assert.equal(a.level, 0);
+  assert.ok(!isDense(m), "three changed functions and five callers are a picture");
   assert.deepEqual(a.groups.map((g) => [g.label, g.kind]), [["◆ Callers not in this PR", "2"], ["◐ Callers in the diff, call untouched", "2"], ["○ Callers changed in this PR", "1"], ["Changed functions", "3"]]);
-  assert.deepEqual(by.get("shop/price.py#4").rows.map((x) => x.text), ["signature changed", "1 test calls it"]);
-  assert.match(by.get("shop/price.py#4").rows[0].tip, /Before: def total\(items\):\nNow: def total\(items, rate\):/);
+  assert.deepEqual(by.get("shop/price.py#4").rows.map((x) => x.text), ["price.py:4", "signature changed", "1 test calls it"]);
+  assert.deepEqual([by.get("shop/price.py#4").description, by.get("shop/price.py#4").rows[0].tip], ["", "shop/price.py:4"], "a card's place is its first row: the file's name with the line, the path as the tooltip");
+  assert.match(by.get("shop/price.py#4").rows[1].tip, /Before: def total\(items\):\nNow: def total\(items, rate\):/);
   assert.equal(by.get("shop/price.py#4").status, "changed"); assert.equal(by.get("shop/price.py#33").status, "new");
-  assert.deepEqual(by.get("shop/price.py#33").rows.map((x) => x.text), ["no test calls it"]);
+  assert.deepEqual(by.get("shop/price.py#33").rows.map((x) => x.text).slice(1), ["no test calls it"]);
   const refund = by.get("c:shop/checkout.py#15");
   assert.deepEqual([refund.label, refund.description, refund.at, refund.group, refund.rows.map((x) => `${x.glyph} ${x.text}`)],
-    ["refund", "shop/checkout.py:17", "shop/checkout.py:17", "m:untouched", ["◐ in the diff, call untouched", "⚠ signature changed, caller not"]]);
+    ["refund", "", "shop/checkout.py:17", "m:untouched", [" checkout.py:17", "◐ in the diff, call untouched", "⚠ signature changed, caller not"]]);
   assert.equal(by.get("c:shop/report.py#0").label, "report.py, top level");
   // monthly() calls total() and net(): one card, two calls.
   assert.deepEqual(a.edges.filter((e) => e.from === "c:shop/report.py#5").map((e) => e.to).sort(), ["shop/price.py#33", "shop/price.py#4"]);
@@ -152,7 +153,7 @@ assert.equal(wide[0].mark, "changed");
   const b = bridge({ "/references": (q) => (q.line === 33 ? { status: "ok", references: [{ path: "shop/checkout.py", line: 6, end: 6, text: "net(1)" }] } : q.line === 4 ? { status: "ok", references: [] } : null) });
   const m = (await computeImpact({ call: b.call, root: "/r", hunks: HUNKS, supported })).model;
   assert.deepEqual(m.functions.map((f) => f.name), ["pay", "total", "discount"], "net() is used only by a line of the diff; pay() changed a call to nothing that changed, so it is a change of its own");
-  assert.deepEqual(impactArch(m).nodes.find((n) => n.id === "shop/price.py#4").rows.map((x) => x.text), ["signature changed", "no test calls it", "no caller found"]);
+  assert.deepEqual(impactArch(m).nodes.find((n) => n.id === "shop/price.py#4").rows.map((x) => x.text), ["price.py:4", "signature changed", "no test calls it", "no caller found"]);
   assert.equal(impactRows(m)[0].name, "no caller found");
 }
 // A function with a change of its own that also calls a changed function stays one: its card, a call between the two.
@@ -207,30 +208,48 @@ assert.equal(wide[0].mark, "changed");
   assert.ok(slow.model.functions.length < 8 && slow.model.functions.length + slow.model.skipped === 8, "past the time limit the rest is skipped");
 }
 
-// ---- more cards than the picture holds
+// ---- many callers: a row per changed symbol instead of a picture
 {
-  const fn = (name, line, callers) => ({ id: `lib.py#${line}`, path: "lib.py", name, kind: "function", container: "", line, end: line + 2, nameLine: line, character: 4, isNew: false, sig: null, callers, outside: 0, more: 0 });
-  const caller = (file, k, mark = "outside") => ({ id: `${file}#${k}`, name: `use${k}`, kind: "function", path: file, line: k, sites: [{ line: k, text: "", mark }], mark, test: false });
-  // 57 callers in 3 files: a card per file.
-  const m1 = { v: 1, servers: ["Python"], uncovered: [], failed: [], skipped: 0, functions: [fn("parse", 1, [...Array.from({ length: 30 }, (_x, k) => caller("a.py", k + 1)), ...Array.from({ length: 20 }, (_x, k) => caller("b.py", k + 1)), ...Array.from({ length: 7 }, (_x, k) => caller("c.py", k + 1, "untouched"))])] };
-  const a1 = impactArch(m1);
-  assert.deepEqual([a1.level, a1.callers, a1.nodes.length], [1, 57, 4]);
-  assert.deepEqual(a1.nodes.slice(1).map((n) => [n.label, n.description, n.group]), [["30 callers in a.py", "a.py", "m:outside"], ["20 callers in b.py", "b.py", "m:outside"], ["7 callers in c.py", "c.py", "m:untouched"]]);
-  assert.equal(impactLines(m1).summed, "The picture sums up 57 callers in 3 cards; the list has every one.");
-  assert.ok(impactDoc(m1).lines.includes("The picture sums up 57 callers in 3 cards; the list has every one.") && impactDoc(m1).rows.length === 57);
-  assert.equal(impactTotals(m1).callers, 57);
-  // Callers in 60 files: a card per changed function and mark.
-  const m2 = { ...m1, functions: [fn("parse", 1, Array.from({ length: 60 }, (_x, k) => caller(`pkg/f${k}.py`, 3, k < 12 ? "untouched" : "outside"))), fn("dump", 9, [caller("pkg/f1.py", 3)])] };
-  const a2 = impactArch(m2);
-  assert.equal(a2.level, 2);
-  assert.deepEqual(a2.nodes.filter((n) => n.group !== "changed").map((n) => n.label), ["12 callers in 12 files", "48 callers in 48 files", "use3"], "one caller alone stays itself");
-  assert.equal(a2.nodes.find((n) => n.label === "48 callers in 48 files").description, "f12.py, f13.py, and 46 more");
-  // More changed functions than cards: the ones with callers outside the PR are drawn, the rest counted.
-  const m3 = { ...m1, functions: Array.from({ length: 50 }, (_x, k) => fn(`f${k}`, 1 + k * 4, k % 10 === 0 ? [caller(`u${k}.py`, 2)] : [])) };
-  const a3 = impactArch(m3);
-  assert.ok(a3.nodes.length <= LIMITS.MAX_CARDS && a3.hidden > 0 && a3.nodes.filter((n) => n.group === "m:outside").length === 5, "all five with an outside caller are in");
-  assert.match(impactLines(m3).summed, /^The picture sums up 5 callers in 5 cards and leaves out \d+ changed functions; the list has every one\.$/);
-  assert.equal(archLayout(a3, "diff", (n) => n.rows.length).nodes.length, a3.nodes.length);
+  const fn = (name, line, callers, more = {}) => ({ id: `lib.py#${line}`, path: "pkg/lib.py", name, kind: "function", container: "", line, end: line + 2, nameLine: line, character: 4, isNew: false, sig: null, callers, outside: 0, more: 0, ...more });
+  const caller = (file, k, mark = "outside", test = false) => ({ id: `${file}#${k}`, name: `use${k}`, kind: "function", path: file, line: k, sites: [{ line: k, text: "", mark }], mark, test });
+  const model = (functions) => ({ v: 2, servers: ["Python"], uncovered: [], failed: [], skipped: 0, functions });
+  // The thresholds: more than 12 changed symbols, 12 callers or 15 calls.
+  assert.ok(!isDense(model([fn("parse", 1, Array.from({ length: IMPACT_DENSE.callers }, (_x, k) => caller("a.py", k + 1)))])) && isDense(model([fn("parse", 1, Array.from({ length: IMPACT_DENSE.callers + 1 }, (_x, k) => caller("a.py", k + 1)))])), "13 callers");
+  assert.ok(isDense(model(Array.from({ length: IMPACT_DENSE.symbols + 1 }, (_x, k) => fn(`f${k}`, 1 + k * 4, [])))), "13 changed symbols");
+  assert.ok(isDense(model(Array.from({ length: 4 }, (_x, k) => fn(`f${k}`, 1 + k * 4, Array.from({ length: 4 }, (_y, i) => caller("a.py", i + 1)))))), "4 callers that each call 4 symbols are 16 calls");
+  assert.ok(!isDense(model([fn("parse", 1, Array.from({ length: 30 }, (_x, k) => caller("tests/test_a.py", k + 1, "changed", true)))])), "tests are no callers here");
+  // What stands out first: a changed signature whose caller did not change, then a finding, then the most callers
+  // outside the PR; what has no caller outside is one line.
+  const sig = { old: "def dump(x):", now: "def dump(x, y):" };
+  const m = model([fn("plain", 1, [caller("a.py", 1), caller("a.py", 2), caller("b.py", 3), caller("tests/test_a.py", 9, "changed", true)]), fn("found", 9, [caller("a.py", 1)]),
+    fn("dump", 17, [caller("pkg/deep/long-name-of-a-module.py", 4), caller("lib2.py", 5, "untouched"), caller("lib3.py", 6, "changed")], { sig }),
+    fn("inner", 25, [caller("lib2.py", 7, "untouched"), caller("lib3.py", 8, "changed")]), fn("alone", 33, []), ...Array.from({ length: 9 }, (_x, k) => fn(`more${k}`, 41 + k * 8, [caller(`c${k}.py`, 1)]))]);
+  const D = impactDense(m, [{ id: "x", file: "pkg/lib.py", line: 10, severity: "high", title: "found is wrong" }]);
+  assert.deepEqual(D.symbols.slice(0, 4).map((r) => [r.name, r.risky, r.mark?.severity ?? null, r.groups.outside.n, r.groups.untouched.n, r.changed, r.tests]),
+    [["dump", 2, null, 1, 1, 1, 0], ["found", 0, "high", 1, 0, 0, 0], ["plain", 0, null, 3, 0, 0, 1], ["more0", 0, null, 1, 0, 0, 0]]);
+  assert.deepEqual(D.symbols[2].groups.outside.files.map((f) => [f.path, f.base, f.n, f.line, f.callers.map((c) => c.name)]), [["a.py", "a.py", 2, 1, ["use1", "use2"]], ["b.py", "b.py", 1, 3, ["use3"]]], "its callers by file, the most first");
+  assert.deepEqual(D.rest, [{ id: "lib.py#25", name: "inner", at: "pkg/lib.py:25", inPr: 2, tests: 0 }, { id: "lib.py#33", name: "alone", at: "pkg/lib.py:33", inPr: 0, tests: 0 }]);
+  assert.equal(restText(D, m), "2 changed functions have no caller outside this PR: inner (2 in the PR), alone.");
+  assert.equal(denseWords(D.symbols[0]), "signature changed, 2 callers keep the old call; 1 caller not in this PR in 1 file; 1 caller in the diff, call untouched in 1 file; 1 caller changed in this PR; no test");
+  assert.equal(denseWords(D.symbols[1]), "1 caller not in this PR in 1 file; no test; high: found is wrong");
+  // A caller file and the symbols it calls (the file chosen on the page).
+  assert.deepEqual(D.files.get("a.py"), [{ id: "lib.py#9", n: 1 }, { id: "lib.py#1", n: 2 }]);
+  assert.equal(denseFile(D, "a.py"), "a.py calls 2 of the changed symbols: found, plain (2 callers).");
+  assert.equal(denseFile(D, "pkg/deep/long-name-of-a-module.py"), "long-name-of-a-module.py calls 1 of the changed symbols: dump.");
+  assert.equal(denseFile(D, "nowhere.py"), "");
+  // The lines and the Markdown say so, with the rows in the page's order and no flowchart.
+  const doc = impactDoc(m, [{ id: "x", file: "pkg/lib.py", line: 10, severity: "high", title: "found is wrong" }]);
+  assert.equal(impactLines(m).dense, denseText());
+  assert.ok(doc.lines.includes(denseText()) && doc.lines.includes("- `dump` (`pkg/lib.py:17`): signature changed, 2 callers keep the old call; 1 caller not in this PR in 1 file; 1 caller in the diff, call untouched in 1 file; 1 caller changed in this PR; no test")
+    && doc.lines.includes("2 changed functions have no caller outside this PR: inner (2 in the PR), alone.") && doc.flow.nodes.length === 0 && doc.rows.length === 20);
+  assert.ok(doc.lines.indexOf("- `found` (`pkg/lib.py:9`): 1 caller not in this PR in 1 file; no test; high: found is wrong") > doc.lines.findIndex((l) => l.startsWith("- `dump`")));
+}
+// The invented result of a large PR (demo/fixtures/gen-impact-dense.mjs): the numbers the rows are made for.
+if (existsSync(new URL("../../demo/fixtures/review/impact-dense.json", import.meta.url))) {
+  const m = JSON.parse(readFileSync(new URL("../../demo/fixtures/review/impact-dense.json", import.meta.url), "utf8")), T = impactTotals(m), D = impactDense(m);
+  assert.deepEqual([T.functions, T.outside, T.untouched, T.changed, T.risky, isDense(m)], [16, 99, 31, 11, 5, true]);
+  assert.deepEqual([D.symbols.length, D.rest.length, D.symbols[0].name, D.symbols[0].risky, D.symbols[1].name, D.symbols[1].groups.outside.n], [11, 5, "useCheckoutSession", 5, "priceBreakdown", 21]);
+  assert.equal(D.symbols.reduce((n, r) => n + r.groups.outside.n, 0), 99, "every caller outside the PR is in a row");
 }
 
 // ---- words

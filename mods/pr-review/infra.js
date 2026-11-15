@@ -12,7 +12,10 @@
 //   level of Properties, references by !Ref, !GetAtt, ${…} and DependsOn. No anchors, flow mappings or tabs.
 import { archQuick, markRoom, ARCH, FIT } from "./arch.js";
 
-export const INFRA_MAX = 40, INFRA_LINES = 4; // cards before one type becomes one card; changed arguments on a card
+export const INFRA_LINES = 4; // changed arguments on a card
+// More changed resources or more references than this, and lines between the cards stop answering anything: the
+// section is then a list of cards by file (infraDense), what stands out first, a card's references on demand.
+export const INFRA_DENSE = { cards: 12, edges: 15, perFile: 48 };
 const NOTE_CH = 36; // the characters of a card's line in one row
 const TF = /\.tf$/, TFVARS = /\.tfvars$/, CFN = /\.(ya?ml|json|template)$/;
 export const isIac = (path) => TF.test(path) || TFVARS.test(path) || CFN.test(path);
@@ -429,49 +432,84 @@ export const rowText = (r) => [`${r.addr} ${STATE[r.status]}`, ...r.changes.map(
 
 // ---- the picture
 
-// The model as arch.js archLayout reads it: {groups, nodes, edges, alias: Map(card id → the card that stands for it),
-// folded: {types, cards} or null}. Over `max` cards, the cards of one type in a group are one card with their number.
-export function infraArch(model, max = INFRA_MAX) {
-  const alias = new Map(), nodes = [];
-  let folded = null;
-  const node = (c) => ({ id: c.id, label: c.name, description: `${c.kind === "data" ? "data " : ""}${c.type} · ${c.file}:${c.line}`, group: c.group, type: c.type, at: `${c.file}:${c.line}`, status: c.status === "added" ? "new" : c.status,
-    source: c.status === "unchanged" ? "existing" : undefined, word: c.status === "replaced" ? "MAY BE REPLACED" : undefined, dashed: c.status === "replaced", lines: cardLines(c) });
-  if (model.cards.length > max) {
-    const by = new Map();
-    for (const c of model.cards) by.set(`${c.group}|${c.type}`, [...(by.get(`${c.group}|${c.type}`) ?? []), c]);
-    for (const [key, list] of by) {
-      if (list.length < 2) { nodes.push(node(list[0])); continue; }
-      const st = [...new Set(list.map((c) => c.status))], c = list[0], sums = Object.keys(STATE).map((k) => [k, list.filter((x) => x.status === k).length]).filter(([, n]) => n).map(([k, n]) => `${n} ${STATE[k]}`).join(", ");
-      for (const x of list) alias.set(x.id, `fold:${key}`);
-      folded = { types: (folded?.types ?? 0) + 1, cards: (folded?.cards ?? 0) + list.length };
-      nodes.push({ id: `fold:${key}`, label: `${list.length} ${c.type}`, description: sums, group: c.group, type: c.type, at: `${c.file}:${c.line}`, status: st.length > 1 ? "changed" : st[0] === "added" ? "new" : st[0], source: st.length === 1 && st[0] === "unchanged" ? "existing" : undefined,
-        word: st.length > 1 ? "MIXED" : st[0] === "replaced" ? "MAY BE REPLACED" : undefined, dashed: st.includes("replaced"), lines: list.some((x) => x.still?.length) ? [{ text: `${list.filter((x) => x.still?.length).length} removed but still referenced`, bad: true, rows: 1 }] : [], count: list.length });
-    }
-  } else nodes.push(...model.cards.map(node));
+// The model as arch.js archLayout reads it: {groups, nodes, edges}. Only for a section that is not dense (isDense):
+// with many resources there is no picture with lines, so nothing here has to fold cards into one.
+export function infraArch(model) {
+  // A card's place is a row of its own, the file's name with its line and never wrapped (its folder is the frame's
+  // title or in the tooltip): in the description a long path was broken in the middle of the file's name.
+  // Its title is the type and the name, the type first: Terraform resources of one thing often share a name (a bucket,
+  // its policy, its lifecycle), and with the name alone as the title they read as the same card several times. Each
+  // part fits a line of the title (the whole address is the tooltip).
+  const node = (c) => ({ id: c.id, label: `${clip(typeTitle(c), ARCH.TITLE_CH)} · ${clip(c.name, ARCH.TITLE_CH - 2)}`, description: "", evidence: c.addr, group: c.group, type: c.type, at: `${c.file}:${c.line}`, status: c.status === "added" ? "new" : c.status,
+    source: c.status === "unchanged" ? "existing" : undefined, word: c.status === "replaced" ? "MAY BE REPLACED" : undefined, dashed: c.status === "replaced",
+    lines: [{ text: `${baseOf(c.file)}:${c.line}`, tip: `${c.file}:${c.line}`, at: `${c.file}:${c.line}`, place: true, rows: 1 }, ...cardLines(c)] });
   const seen = new Set(), edges = [];
-  for (const e of model.edges) { const from = alias.get(e.from) ?? e.from, to = alias.get(e.to) ?? e.to, k = `${from}>${to}`; if (from === to || seen.has(k)) continue; seen.add(k); edges.push({ ...e, from, to, label: alias.has(e.from) || alias.has(e.to) ? "" : e.label }); }
-  return { groups: model.groups, nodes, edges, alias, folded };
+  for (const e of model.edges) { const k = `${e.from}>${e.to}`; if (e.from === e.to || seen.has(k)) continue; seen.add(k); edges.push(e); }
+  return { groups: model.groups, nodes: model.cards.map(node), edges };
 }
 const RANK = { critical: 0, high: 1, medium: 2, low: 3 }, sameFile = (a, b) => a === b || a.endsWith(`/${b}`) || b.endsWith(`/${a}`);
 // The findings whose line lies inside a resource's block, as arch.js archMarks gives them ({nodes, edges}).
-export function infraMarks(model, findings, alias = new Map()) {
+export function infraMarks(model, findings) {
   const nodes = new Map();
   for (const f of findings ?? []) {
     const c = model.cards.find((x) => x.status !== "removed" && f.file && sameFile(x.file, f.file) && f.line >= x.line && f.line <= x.end);
     if (!c) continue;
-    const k = alias.get(c.id) ?? c.id, m = nodes.get(k) ?? { findings: [], n: 0, breaks: 0, severity: f.severity };
+    const k = c.id, m = nodes.get(k) ?? { findings: [], n: 0, breaks: 0, severity: f.severity };
     m.findings.push(f); m.n++;
     if ((RANK[f.severity] ?? 9) < (RANK[m.severity] ?? 9)) m.severity = f.severity;
     nodes.set(k, m);
   }
   return { nodes, edges: new Map() };
 }
+// ---- many resources: cards by file instead of a graph
+
+const baseOf = (path) => path.slice(path.lastIndexOf("/") + 1);
+const clip = (s, n) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+/** A type without its provider: "aws_s3_bucket" → "s3_bucket", "AWS::SQS::Queue" → "SQS::Queue"; a type of one word stays. */
+export const shortType = (type) => (type.startsWith("AWS::") ? type.slice(5) : /^[a-z0-9]+_./.test(type) ? type.slice(type.indexOf("_") + 1) : type);
+const typeTitle = (c) => `${c.kind === "data" ? "data " : ""}${shortType(c.type)}`;
+/** The section is a list by file, not a graph: more changed resources or more references than a picture with lines can show. */
+export const isDense = (model) => model.cards.filter((c) => c.status !== "unchanged").length > INFRA_DENSE.cards || model.edges.length > INFRA_DENSE.edges;
+export const denseText = () => `More than ${INFRA_DENSE.cards} resources or ${INFRA_DENSE.edges} references: they stand by file with what stands out first, and no lines are drawn.`;
+// What stands out comes first: a card with a finding (the worst first), one that is still referenced though removed
+// or uses something removed, then may be replaced, removed, changed, added, unchanged; among equals by line.
+const STATE_RANK = { replaced: 2, removed: 3, changed: 4, added: 5, unchanged: 6 };
+/**
+ * The model for the list: {groups: [{file, dir, base, kind, types: [[type, n]], cards, more: cards left out}], refs:
+ * Map(card id → {to: [{id, label}], from: [{id, label}]}), names: Map(card id → address), uniform: the one state all
+ * changed cards share or null, marks: infraMarks}. A card: {id, name, type: its type without the provider (the card's
+ * title: resources often share a name), status, line, at, lines: cardLines, mark: its findings or null, to, from: how
+ * many it refers to and how many refer to it}. Pure.
+ */
+export function infraDense(model, findings = []) {
+  const marks = infraMarks(model, findings), refs = new Map(model.cards.map((c) => [c.id, { to: [], from: [] }])), kind = new Map(model.groups.map((g) => [g.id, g.kind]));
+  for (const e of model.edges) { if (e.from === e.to || !refs.has(e.from) || !refs.has(e.to)) continue; refs.get(e.from).to.push({ id: e.to, label: e.label }); refs.get(e.to).from.push({ id: e.from, label: e.label }); }
+  const rank = (c) => { const m = marks.nodes.get(c.id); return m ? [0, RANK[m.severity] ?? 9] : c.still?.length || (c.uses ?? []).some((u) => u.status === "removed") ? [1, 0] : [STATE_RANK[c.status] ?? 6, 0]; };
+  const by = new Map();
+  for (const c of model.cards) by.set(c.file, [...(by.get(c.file) ?? []), c]);
+  const groups = [...by].map(([file, list]) => {
+    const sorted = list.map((c) => ({ c, r: rank(c) })).sort((a, b) => a.r[0] - b.r[0] || a.r[1] - b.r[1] || a.c.line - b.c.line), types = new Map();
+    for (const c of list) types.set(typeTitle(c), (types.get(typeTitle(c)) ?? 0) + 1);
+    return { file, dir: file.slice(0, file.lastIndexOf("/") + 1), base: baseOf(file), kind: kind.get(list[0].group) ?? "", best: sorted[0].r, types: [...types].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])), more: Math.max(0, sorted.length - INFRA_DENSE.perFile),
+      // ponytail: at most perFile cards of a file are drawn (the rest is counted, the Markdown table has all); page them if a file ever has more that matter.
+      cards: sorted.slice(0, INFRA_DENSE.perFile).map(({ c }) => ({ id: c.id, name: c.name, type: typeTitle(c), status: c.status, line: c.line, at: `${c.file}:${c.line}`, lines: cardLines(c), mark: marks.nodes.get(c.id) ?? null, to: refs.get(c.id).to.length, from: refs.get(c.id).from.length })) };
+  }).sort((a, b) => a.best[0] - b.best[0] || a.best[1] - b.best[1] || a.file.localeCompare(b.file));
+  const states = new Set(model.cards.filter((c) => c.status !== "unchanged").map((c) => c.status));
+  return { groups, refs, names: new Map(model.cards.map((c) => [c.id, c.addr])), uniform: states.size === 1 ? [...states][0] : null, marks };
+}
+/** A chosen card's references in words: "x refers to 2: a (role), b. 1 refers to it: c (function_name)." */
+export function denseRefs(dense, id) {
+  const r = dense.refs.get(id), name = (x) => `${dense.names.get(x.id) ?? x.id}${x.label ? ` (${x.label})` : ""}`;
+  if (!r) return "";
+  return `${dense.names.get(id) ?? id} ${r.to.length ? `refers to ${r.to.length}: ${r.to.map(name).join(", ")}` : "refers to nothing in this PR"}. ${r.from.length ? `${r.from.length} ${r.from.length === 1 ? "refers" : "refer"} to it: ${r.from.map(name).join(", ")}` : "Nothing in this PR refers to it"}.`;
+}
+
 // → {arch, marks, args, L}: one layout with a row per line of a card and the room its finding mark takes. args: what
 // the layout got, for the search for a better layout after the frame (stack.js laidOut, arch.js layoutJob). L is what a
 // frame can afford (arch.js archQuick); lay: false leaves it to the caller (the review lays a big picture out after
 // the frame).
 export function infraPicture(model, findings = [], fit = false, lay = true) {
-  const arch = infraArch(model), marks = infraMarks(model, findings, arch.alias), w = (fit ? FIT : ARCH).W - 20;
+  const arch = infraArch(model), marks = infraMarks(model, findings), w = (fit ? FIT : ARCH).W - 20;
   const args = [arch, "diff", (n) => (n.lines ?? []).reduce((k, l) => k + l.rows, 0) + (marks.nodes.has(n.id) ? markRoom(marks.nodes.get(n.id), w).rows : 0), fit, { labels: true }];
   return { arch, marks, args, ...(lay ? { L: archQuick(...args) } : {}) };
 }
@@ -483,17 +521,18 @@ export function infraPicture(model, findings = [], fit = false, lay = true) {
 const mdCode = (x) => { const s = squash(x ?? "").replace(/`/g, "'"); return s ? `\`${s}\`` : ""; };
 export function infraMd(model, { table, flow, findings = [], h = "##" } = {}) {
   if (!model) return [];
-  const arch = infraArch(model), marks = infraMarks(model, findings, arch.alias), card = new Map(model.cards.map((c) => [c.id, c]));
+  const arch = infraArch(model), marks = infraMarks(model, findings), card = new Map(model.cards.map((c) => [c.id, c]));
   const nodes = arch.nodes.map((n) => { const c = card.get(n.id); return { id: n.id, group: n.group, status: n.status === "replaced" ? "changed" : n.status,
-    label: c ? `${c.kind === "data" ? "data " : ""}${c.type} ${c.name}${c.status === "replaced" ? ", may be replaced" : ""}${c.still?.length ? ", still referenced" : ""}` : [`${n.label}: ${n.description}`, ...n.lines.map((l) => l.text)].join(", ") }; });
-  const own = infraMarks(model, findings).nodes, found = (c) => { const m = own.get(c.id); return m ? `${m.severity}: ${m.findings.map((f) => squash(f.title)).join("; ")}` : ""; };
+    label: `${c.kind === "data" ? "data " : ""}${c.type} ${c.name}${c.status === "replaced" ? ", may be replaced" : ""}${c.still?.length ? ", still referenced" : ""}` }; });
+  const own = marks.nodes, found = (c) => { const m = own.get(c.id); return m ? `${m.severity}: ${m.findings.map((f) => squash(f.title)).join("; ")}` : ""; };
   const notes = (c) => cardLines(c, 0).filter((l) => !/^and \d+ more$/.test(l.text)).map((l) => l.text);
   return [`${h} Infrastructure changes (${model.total})`, "", infraSource(model), "",
     ...(model.notices.length ? [...model.notices.map((n) => `- ${mdCode(noticeText(n))}`), ""] : []),
-    ...(model.cards.length ? [`${infraSummary(model)}${arch.folded ? ` ${foldText(arch.folded)}` : ""} A card's class in the diagram is its state; an arrow points at what a resource refers to.`, "", ...flow({ groups: arch.groups, nodes, edges: arch.edges }, { systems: true, marks }), "",
+    // Many resources: no flowchart (its lines would say as little as the page's); the table names what each depends on.
+    ...(model.cards.length ? [...(isDense(model) ? [`${infraSummary(model)} ${denseText()}`, ""]
+      : [`${infraSummary(model)} A card's class in the diagram is its state; an arrow points at what a resource refers to.`, "", ...flow({ groups: arch.groups, nodes, edges: arch.edges }, { systems: true, marks }), ""]),
       ...table(["Resource", "State", "Changed arguments", "Depends on", "Where", "Unresolved findings"], model.cards.map((c) => [mdCode(`${c.kind === "data" ? "data " : ""}${c.type} ${c.name}`), [STATE[c.status], mdCode(notes(c).join("; "))].filter(Boolean).join("; "), mdCode(c.changes.map((x) => x.text).join("; ")), mdCode(c.deps.join(", ")), mdCode(`${c.file}:${c.line}`), found(c)]))] : []),
     ...(model.rows.length ? [`${h}# Variables, outputs and other values (${model.rows.length})`, "", ...model.rows.map((r) => `- ${mdCode(rowText(r))} (${mdCode(`${r.file}:${r.line}`)})`), ""] : []),
     ...(model.unread.length ? [...model.unread.map((u) => `- ${mdCode(unreadText(u))}`), ""] : [])];
 }
-export const foldText = (f) => `Over ${INFRA_MAX} cards: ${f.cards} resources of ${f.types} ${f.types === 1 ? "type" : "types"} are one card per type.`;
 export const unreadText = (u) => `${u.path} is not in the picture: ${u.why}.`;

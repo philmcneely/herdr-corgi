@@ -85,6 +85,21 @@ assert.deepEqual(TH.selectedOf(fx, "pr"), ["c1", "p9"]);
 assert.equal(TH.threadsOf(fx, "pr").length, 1, "the selection keeps the threads");
 assert.deepEqual(TH.selectedOf(TH.toggleSelected(fx, "pr", "c1", 4), "pr"), ["p9"]);
 assert.deepEqual(TH.selectedOf(JSON.parse(JSON.stringify(fx)), "pr"), ["c1", "p9"], "it persists with the threads");
+// Someone else's GitHub comment in a fix: a comment with the id gh<id> and its author; sent, it is a thread that keeps
+// the author and the GitHub id (so the review shows it once, as that thread); the task names the author and the text.
+{ const g = TH.ghComment({ id: 77, path: "a.py", line: 4, side: "RIGHT", body: "Never ends for 0.", user: "copilot", url: "https://github.com/o/r/pull/2#discussion_r77" });
+  assert.deepEqual([g.id, g.file, g.start, g.end, g.old, g.by, g.ghId, g.from], ["gh77", "a.py", 4, 4, false, "copilot", 77, "github"]);
+  const th = TH.threadsOf(TH.addThreads({}, "pr", [g], { route: "agent", agent: "a" }, 5), "pr")[0];
+  assert.deepEqual([th.id, th.by, th.ghId, th.url, th.route], ["gh77", "copilot", 77, "https://github.com/o/r/pull/2#discussion_r77", "agent"]);
+  assert.equal(TH.commentRows({ threads: [th] })[0].src, "github", "its row keeps GitHub's mark");
+  const text = TH.fixCommentsPrompt({ pr: { number: 2, title: "t" }, comments: [g, { id: "c1", file: "b.py", start: 1, end: 1, text: "Mine." }], file: "/r.jsonl" });
+  assert.ok(text.includes("1. [gh77] `a.py` line 4 · a GitHub comment by @copilot\nNever ends for 0.") && text.includes("2. [c1] `b.py` line 1\nMine."), text);
+  assert.equal(TH.fixBothPrompt("COMMENTS", "FINDINGS"), "COMMENTS\n\nThe same task has a second part, in the same place and the same series of commits.\n\nFINDINGS"); }
+// The findings ticked in the Findings tab are a list of their own beside it, kept the same way.
+{ let d = TH.toggleSelected(TH.toggleSelected(fx, "pr", "f1", 5, TH.FINDINGS), "pr", "f2", 6, TH.FINDINGS);
+  assert.deepEqual([TH.selectedOf(d, "pr", TH.FINDINGS), TH.selectedOf(d, "pr")], [["f1", "f2"], ["c1", "p9"]]);
+  d = TH.toggleSelected(d, "pr", "f1", 7, TH.FINDINGS); assert.deepEqual(TH.selectedOf(JSON.parse(JSON.stringify(d)), "pr", TH.FINDINGS), ["f2"]);
+  d = TH.clearSelected(d, "pr", 8, TH.FINDINGS); assert.deepEqual([TH.selectedOf(d, "pr", TH.FINDINGS), TH.selectedOf(d, "pr")], [[], ["c1", "p9"]], "emptied alone"); }
 fx = TH.addThreads(fx, "pr", [{ id: "c2", file: "b.py", end: 1, text: "u" }], { route: "agent" }, 5);
 assert.deepEqual(TH.selectedOf(fx, "pr"), ["c1", "p9"], "adding threads keeps the selection");
 assert.equal(TH.fixBranch(7, ["mwb8736v"]), "fix/7-mwb8736v");

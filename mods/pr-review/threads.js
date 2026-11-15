@@ -24,7 +24,7 @@ function bound(doc, key, threads, now, extra = {}) {
 // one sent again replaces its thread.
 export function addThreads(doc, key, comments, how, now = Date.now()) {
   const made = withIds(comments).map((c) => ({ id: c.id, file: c.file, start: c.start, end: c.end, old: Boolean(c.old), hunk: c.hunk ?? null, text: c.text, from: c.from ?? null,
-    route: how.route, sentAt: now, agent: how.agent ?? null, dry: Boolean(how.dry), ghId: how.gh?.[c.id]?.ghId ?? null, url: how.gh?.[c.id]?.url ?? null, followups: [],
+    route: how.route, sentAt: now, agent: how.agent ?? null, dry: Boolean(how.dry), ghId: how.gh?.[c.id]?.ghId ?? c.ghId ?? null, url: how.gh?.[c.id]?.url ?? c.url ?? null, by: c.by ?? null, followups: [],
     code: c.code ?? null, head: c.head ?? null })); // what the lines read when written (pr.js isStale)
   const ids = new Set(made.map((t) => t.id));
   return bound(doc, key, [...threadsOf(doc, key).filter((t) => !ids.has(t.id)), ...made], now);
@@ -33,6 +33,11 @@ export function addThreads(doc, key, comments, how, now = Date.now()) {
 export function addFollowup(doc, key, id, text, after, now = Date.now()) {
   return bound(doc, key, threadsOf(doc, key).map((t) => (t.id === id ? { ...t, followups: [...(t.followups ?? []), { text, at: now, after }] } : t)), now);
 }
+
+// Someone else's GitHub comment (review.js ghComments: {id, path, line, side, body, user, url}) as a comment that can
+// be ticked and sent to a fix: its id is "gh<id>", `by` its author. Sent, it becomes a thread here (addThreads keeps
+// by, ghId and url), so its fix and the agent's answer show at it; nothing is ever written to GitHub for it.
+export const ghComment = (g) => ({ id: `gh${g.id}`, file: g.path, start: g.line ?? g.original_line ?? 0, end: g.line ?? g.original_line ?? 0, old: g.side === "LEFT", text: g.body ?? "", from: "github", by: g.user ?? null, ghId: g.id, url: g.url ?? null });
 
 // The agent's answers: one JSON line each {id, reply, status, commit?}; all kept per id in file order, broken lines
 // (half-written) skipped, an unknown status read as "answered".
@@ -128,13 +133,15 @@ export const postedItems = (payload) => [...(payload.body ? [`Review body: ${pay
 // ---- Fix: comments (and findings) to a sub-agent in its own worktree, or to the main agent; the selection
 
 export const MAX_FIXES = 30;
-export const selectedOf = (doc, key) => doc?.[key]?.selected ?? [];
-// The selection for "Fix selected": comment ids, kept per PR.
-export const toggleSelected = (doc, key, id, now = Date.now()) => {
-  const sel = selectedOf(doc, key);
-  return bound(doc, key, threadsOf(doc, key), now, { selected: sel.includes(id) ? sel.filter((x) => x !== id) : [...sel, id] });
+// The selection for "Fix selected", kept per PR: comment ids (field "selected", the Comments tab and the cards), and
+// the ids of the findings ticked in the Findings tab (FINDINGS), each a list of its own.
+export const FINDINGS = "selectedFindings";
+export const selectedOf = (doc, key, field = "selected") => doc?.[key]?.[field] ?? [];
+export const toggleSelected = (doc, key, id, now = Date.now(), field = "selected") => {
+  const sel = selectedOf(doc, key, field);
+  return bound(doc, key, threadsOf(doc, key), now, { [field]: sel.includes(id) ? sel.filter((x) => x !== id) : [...sel, id] });
 };
-export const clearSelected = (doc, key, now = Date.now()) => bound(doc, key, threadsOf(doc, key), now, { selected: [] });
+export const clearSelected = (doc, key, now = Date.now(), field = "selected") => bound(doc, key, threadsOf(doc, key), now, { [field]: [] });
 
 // Fix jobs: {id, branch, path (its worktree), base (the PR's checkout), head (where the branch starts), items: [{kind:
 // "comment" | "finding", id}], terminal, target: "sub" | "main", at, state: "running" | "applied" | "discarded"}.
@@ -215,10 +222,14 @@ const takeOver = ({ branch, head, path }) => `Please take it over: on your PR br
   `and push to the PR branch. Then remove the fix worktree and branch: git worktree remove ${path} && git branch -D ${branch}`;
 // The comments as one fix task, with ids and the replies contract (each point answered with status fixed and the commit).
 export function fixCommentsPrompt({ pr, comments, file, lang, branch = null, path = null }) {
-  const items = withIds(comments).map((c, i) => [`${i + 1}. [${c.id}] \`${c.file}\`${c.start === undefined ? "" : ` ${lineLabel(c)}`}`, c.hunk ? "```diff\n" + c.hunk + "\n```" : null, c.text.trim()].filter(Boolean).join("\n"));
+  const items = withIds(comments).map((c, i) => [`${i + 1}. [${c.id}] \`${c.file}\`${c.start === undefined ? "" : ` ${lineLabel(c)}`}${c.by ? ` · a GitHub comment by @${c.by}` : ""}`, c.hunk ? "```diff\n" + c.hunk + "\n```" : null, c.text.trim()].filter(Boolean).join("\n"));
   return [`${pr ? `PR #${pr.number} "${pr.title}"${pr.url ? ` (${pr.url})` : ""}` : "This branch"}: please fix ${comments.length === 1 ? "this review comment" : `these ${comments.length} review comments`}.`,
     branch ? worktreeNote(branch, path) : null, ...items, repliesContract(file, withIds(comments)[0]?.id)].filter(Boolean).join("\n\n") + answerIn(lang);
 }
+
+// Comments and findings ticked together are one fix task: the comments' text (fixCommentsPrompt: the worktree note and
+// how each comment is answered), then the findings' (pr.js fixPrompt: how each is reported).
+export const fixBothPrompt = (commentsText, findingsText) => `${commentsText}\n\nThe same task has a second part, in the same place and the same series of commits.\n\n${findingsText}`;
 
 // hc run for the sub-agent: under the PR's agent (parent) so it shows there, in its worktree, on the PR's context
 // (env: the context's command prefix), no notes typed into the parent.
@@ -302,7 +313,7 @@ export function commentRows({ pending = [], threads = [], replies = {}, gh = [],
   for (const t of threads) {
     const r = replies[t.id] ?? [], last = r.at(-1)?.status, g = ghRepliesTo(gh, t.ghId).length;
     const state = last === "fixed" ? "fixed" : last === "wontfix" ? "declined" : last || g ? "replied" : "waiting";
-    rows.push({ id: t.id, kind: "thread", src: "mine", file: t.file, line: t.end, old: Boolean(t.old), text: t.text, state, replies: r.length + g, route: t.route, stale: stale(t.id) });
+    rows.push({ id: t.id, kind: "thread", src: t.from === "github" ? "github" : "mine", file: t.file, line: t.end, old: Boolean(t.old), text: t.text, state, replies: r.length + g, route: t.route, stale: stale(t.id) });
   }
   for (const g of gh) if (!ghOwn(g) && !g.in_reply_to_id) rows.push({ id: `gh${g.id}`, kind: "gh", src: "github", file: g.path, line: g.line ?? g.original_line ?? 0, old: g.side === "LEFT", text: g.body ?? "", state: "github",
     replies: gh.filter((x) => x.in_reply_to_id === g.id).length, author: g.user, resolved: Boolean(g.resolved), outdated: Boolean(g.outdated) });
