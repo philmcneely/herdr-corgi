@@ -9,7 +9,7 @@
       "repo": "https://github.com/saefty/herdr-corgi-pr-review.git",
       "path": "mods/pr-review",
       "default": true,
-      "bundle_exclude": ["test_smoke.mjs"]
+      "bundle_exclude": ["test_smoke.mjs", "test_infra.mjs", "test_schema.mjs", "test_perf.mjs"]
     },
     "chatbar": {
       "repo": "https://github.com/saefty/herdr-corgi-chatbar.git",

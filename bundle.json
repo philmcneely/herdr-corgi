@@ -1,13 +1,13 @@
 {
   "goto": {
     "repo": "https://github.com/saefty/herdr-corgi-goto",
-    "tag": "v0.3.0",
-    "sha": "98e9b0af631b48a3d2e9a3e72707916a37530c05"
+    "tag": "v0.3.1",
+    "sha": "51c88a553a786d126fb4b0a6bd678be795d619d7"
   },
   "pr-review": {
     "repo": "https://github.com/saefty/herdr-corgi-pr-review",
-    "tag": "v0.11.0",
-    "sha": "fcf88245c348d489cc70cf4f8e060da024aee436"
+    "tag": "v0.11.1",
+    "sha": "48e74ddc883d65276305c06092ab663dc75fba72"
   },
   "chatbar": {
     "repo": "https://github.com/saefty/herdr-corgi-chatbar",
