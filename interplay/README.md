@@ -7,6 +7,7 @@ It runs locally only: it needs Herdr's window (`herdr-app check` and the window 
 ./interplay/setup.sh             # builds interplay/run (ignored by git)
 python3 interplay/run.py         # starts the demo window, installs the mods, checks, takes screenshots, stops
 python3 interplay/run.py --keep  # the same, but leaves the demo window open to look around
+python3 interplay/run.py --shots # only the checks that take the README's pictures: no fallback runs, no clipboard
 python3 interplay/run.py --stop  # stops a kept or crashed demo and cleans up
 ```
 

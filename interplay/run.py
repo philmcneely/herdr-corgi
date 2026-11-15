@@ -4,6 +4,7 @@ missing mod. Run interplay/setup.sh first.
 
     python3 interplay/run.py            setup's demo: start, install, check, screenshots, stop
     python3 interplay/run.py --keep     the same, but leave the demo window open to look around
+    python3 interplay/run.py --shots    only the checks that take the README's pictures (no fallback runs)
     python3 interplay/run.py --stop     stop a kept (or crashed) demo and clean up
 
 The demo window has its own Herdr home (run/app), its own herdr-core (HC_SESSION corgi-demo, socket
@@ -365,11 +366,14 @@ def check_reply():
 
 
 def discuss(want, timeout=12):
-    """pr-review's Discuss on the high finding, again until `want` sees its effect (the review loads its findings first)."""
+    """pr-review's Discuss on the high finding and Send in its preview (the preview comes first, always), again until
+    `want` sees its effect (the review loads its findings first)."""
     end = time.time() + timeout
     while True:
         since = now_ms()
         do("pr-review.discuss:f-cr-1")
+        time.sleep(0.5)
+        do("pr-review.send", check=False)  # no preview yet (the findings are still loading): nothing to send
         hit = want(since)
         if hit or time.time() > end:
             return since, hit
@@ -543,8 +547,9 @@ def main(argv):
         publish(shots["goto-reply"], "goto-reply", "1340:440:620:100")
         publish(shots["review-discuss"], "discuss")
         publish(shots["dictate-draft"], "dictate", "1500:620:1050:880")
-        for m in MODS:
-            fallback(m)
+        if "--shots" not in argv:  # the pictures are taken; the fallback runs restart the window five times and use the clipboard
+            for m in MODS:
+                fallback(m)
         (RUN / "report.json").write_text(json.dumps({"results": RESULTS, "shots": {k: str(v) for k, v in shots.items() if v}}, indent=1))
     finally:
         pumping(False)
