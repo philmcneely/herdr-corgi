@@ -176,26 +176,34 @@ assert.deepEqual(listRows(mine, [], []).list, mine);
 
 // The risk signal of a row comes from cached files only: the highest severity among the open findings (the analysis'
 // own and the reviewers'), and whether one of them is about security. Nothing cached: nothing shown.
+const core = ({ top, open, security }) => ({ top, open, security }); // the mark's form and words are tested with the sign below
 assert.equal(riskSignal({}), null);
 assert.equal(riskSignal({ analysis: null, findings: undefined }), null);
 const layers = { steps: [{ findings: [{ id: "a1", severity: "medium", category: "bug" }, { id: "a2", severity: "high", category: "security" }] }, { findings: [{ id: "a3", severity: "low", category: "structure" }] }, {}] };
 const reviewers = [{ id: "r1", reviewer: "security", severity: "critical" }, { id: "r2", reviewer: "claude", severity: "medium" }];
-assert.deepEqual(riskSignal({ analysis: layers, findings: reviewers }), { top: "critical", open: 5, security: true });
+assert.deepEqual(core(riskSignal({ analysis: layers, findings: reviewers })), { top: "critical", open: 5, security: true });
 // A fixed or dismissed finding no longer counts; one with a fix sent (progress) still does.
-assert.deepEqual(riskSignal({ analysis: layers, findings: reviewers, status: { r1: { s: "fixed" }, a2: { s: "progress" } } }), { top: "high", open: 4, security: true });
-assert.deepEqual(riskSignal({ analysis: layers, findings: reviewers, status: { r1: { s: "dismissed" }, a2: { s: "fixed" } } }), { top: "medium", open: 3, security: false });
-assert.deepEqual(riskSignal({ analysis: { steps: [] }, findings: [] }), { top: null, open: 0, security: false });
+assert.deepEqual(core(riskSignal({ analysis: layers, findings: reviewers, status: { r1: { s: "fixed" }, a2: { s: "progress" } } })), { top: "high", open: 4, security: true });
+assert.deepEqual(core(riskSignal({ analysis: layers, findings: reviewers, status: { r1: { s: "dismissed" }, a2: { s: "fixed" } } })), { top: "medium", open: 3, security: false });
+assert.deepEqual(core(riskSignal({ analysis: { steps: [] }, findings: [] })), { top: null, open: 0, security: false });
 // ⛨ as in the review (pr.js isSecurity): by the finding's effect when it has one, not by who found it.
 assert.equal(riskSignal({ findings: [{ id: "s", reviewer: "security", severity: "high", impact: "edge_case", category: "bug" }] }).security, false, "the security reviewer's bug is no security finding");
 assert.equal(riskSignal({ findings: [{ id: "c", reviewer: "claude", severity: "high", impact: "unauthorized_access", category: "bug" }] }).security, true, "access without permission is, whoever found it");
 assert.equal(riskSignal({ findings: [{ id: "d", reviewer: "claude", severity: "high", impact: "data_loss", category: "data" }] }).security, false, "data loss only with the category security");
 // An analysis cached before layers had findings still loads.
-assert.deepEqual(riskSignal({ analysis: {} }), { top: null, open: 0, security: false });
+assert.deepEqual(core(riskSignal({ analysis: {} })), { top: null, open: 0, security: false });
 
 // The progress of a review in progress says "layers", like the review's tab, and leaves out what is zero.
-assert.equal(progressText({ steps: 6, stepsChecked: 0, files: 9, filesViewed: 2, comments: 1, replies: 0, fixedThreads: 0, findingsOpen: 11 }), "0/6 layers · 2/9 files · 1 comment · 11 open findings");
-assert.equal(progressText({ steps: 1, stepsChecked: 1, comments: 2, replies: 1, fixedThreads: 3, findingsOpen: 1 }), "1/1 layers · 2 comments · 1 reply · 3 fixed · 1 open finding");
+assert.equal(progressText({ steps: 6, stepsChecked: 0, files: 9, filesViewed: 2, comments: 1, replies: 0, fixedThreads: 0, findingsOpen: 11 }), "0/6 layers · 2/9 files · 1 comment · 11 unresolved findings");
+assert.equal(progressText({ steps: 1, stepsChecked: 1, comments: 2, replies: 1, fixedThreads: 3, findingsOpen: 1 }), "1/1 layers · 2 comments · 1 reply · 3 fixed · 1 unresolved finding");
 assert.equal(progressText(), "");
+{ // per file of a chosen PR: the highest open severity and whether one is about security; a settled finding counts no more
+  const { fileRisk } = await import("./views.js");
+  const fs = [{ id: "a", file: "x.py", severity: "high", category: "security" }, { id: "b", file: "x.py", severity: "low" }, { id: "c", file: "y.py", severity: "medium" }, { id: "d", file: "z.py", severity: "high" }];
+  const m = fileRisk({ findings: fs.slice(0, 3), analysis: { steps: [{ findings: [fs[3]] }] }, status: { d: { s: "fixed" }, a: { s: "progress" } } });
+  assert.deepEqual([...m].map(([k, r]) => [k, r.top, r.open, r.security]), [["x.py", "high", 2, true], ["y.py", "medium", 1, false]]);
+  assert.equal(fileRisk().size, 0);
+}
 
 assert.equal(pendingText([{ file: "a.py" }]), "1 pending comment in 1 file");
 assert.equal(pendingText([{ file: "a.py" }, { file: "a.py" }, { file: "b.py" }]), "3 pending comments in 2 files");
@@ -209,7 +217,7 @@ assert.equal(pendingText([{ file: "a.py" }, { file: "a.py" }, { file: "b.py" }])
   // A row's findings in words: the highest severity with its count, all of them for the tooltip, security counted.
   assert.equal(worst([]), null);
   assert.deepEqual(worst([{ severity: "medium" }, { severity: "high", security: true }, { severity: "medium" }, { severity: "low" }]),
-    { severity: "high", count: 1, total: 4, label: "1 high", words: "1 high, 2 medium, 1 low", security: 1 });
+    { severity: "high", count: 1, total: 4, label: "1 high", words: "1 high, 2 medium, 1 low", security: 1, sign: { top: "high", color: "ansi1", form: "plain" }, signWords: "1 high" });
   assert.equal(worst([{ severity: "low" }, { severity: "low" }]).label, "2 low");
   // Blockers by severity, security first among equals, the rest in their order.
   const bs = [{ severity: "medium", title: "rule" }, { severity: "high", title: "bug" }, { severity: "low", title: "overlap" }, { severity: "high", title: "auth", finding: "s1" }, { severity: "high", title: "bug 2" }];
@@ -244,11 +252,21 @@ assert.equal(pendingText([{ file: "a.py" }, { file: "a.py" }, { file: "b.py" }])
   const bm = [{ kind: "security", finding: F("s1") }, { kind: "security", finding: F("s2") }, { kind: "resilience", path: "p1" }, { kind: "resilience", path: "p2" }, { kind: "resilience", path: "p3" },
     { kind: "resilience", path: null }, { kind: "criterion", finding: F("c1"), asks: [A("a1"), A("a2")] }, { kind: "criterion", finding: F("c2"), asks: [A("a1")] }, { kind: "ask", ask: A("a3"), asks: [A("a3")] },
     { kind: "rule" }, { kind: "finding", finding: F("h1") }, { kind: "finding", finding: F("h2") }, { kind: "verify" }];
-  assert.deepEqual(mergeGroups(bm).map((g) => g.text), ["⛨ 2 security", "3 resilience paths", "1 not observable", "3 criteria", "1 check", "2 high", "1 fix to verify"]);
+  assert.deepEqual(mergeGroups(bm).map((g) => g.text), ["⛨ 2 security", "3 resilience blockers", "1 not observable", "2 findings on 2 criteria and 1 criterion without a finding", "1 check", "2 high", "1 fix to verify"]);
+  // Every number counts rows (acceptance, engineer 3): the numbers of a line add up to the rows it speaks of.
+  for (const part of [bm, bm.slice(5), bm.slice(7), bm.slice(8), []]) assert.equal(mergeGroups(part).reduce((n, g) => n + g.n, 0), part.length);
   assert.deepEqual(mergeFirst(bm, 5).map((r) => bm.indexOf(r)), [0, 1, 2, 5, 6], "every security row, then one of each group in order before a second of any");
   assert.deepEqual(mergeFirst(bm.slice(2), 5).map((r) => bm.slice(2).indexOf(r)), [0, 3, 4, 7, 8]);
   assert.deepEqual(mergeFirst(bm.slice(0, 3), 5).length, 3);
-  assert.deepEqual(mergeGroups(bm.slice(7), [bm[6]]).map((g) => g.text), ["1 criterion", "1 check", "2 high", "1 fix to verify"], "the criteria a shown row breaks are not counted again");
+  assert.deepEqual(mergeGroups(bm.slice(7)).map((g) => g.text), ["1 finding on 1 criterion and 1 criterion without a finding", "1 check", "2 high", "1 fix to verify"]);
+  assert.deepEqual(mergeGroups([bm[8], { kind: "ask", ask: A("a4"), asks: [A("a4")] }]).map((g) => [g.n, g.text]), [[2, "2 criteria without a finding"]]);
+  // Acceptance, engineer 2: the later findings of a row's cause count at that row, not under "Other findings".
+  {
+    const { mergeHeld } = await import("./views.js");
+    const tok2 = { id: "tok", ids: ["tok", "tok2"] }, tpl2 = { id: "tpl", same_cause: "tok2" }, lone = { id: "lone", same_cause: "gone" }, free = { id: "free" };
+    assert.deepEqual([...mergeHeld([{ kind: "security", finding: tok2 }, { kind: "rule" }], [tok2, tpl2, lone, free])], ["tok", "tpl"]);
+    assert.deepEqual([...mergeHeld([{ kind: "finding", finding: free }], [tpl2, lone, free])], ["free"], "its first is not a row: it stays among the other findings");
+  }
   // By cause: the later finding of a cause goes while the first is open, and the first row names its place.
   const { byCause } = await import("./views.js");
   const tok = { id: "a1", ids: ["a1"] }, tpl = { id: "a2", ids: ["a2"], same_cause: "a1" }, other = { id: "a3", ids: ["a3"] };
@@ -377,6 +395,12 @@ assert.equal(rangeMarks(mr, [{ line: 7.5, end: 9, mark: "x" }, { line: 9, end: 7
 // The height of a Markdown text: paragraphs, a list and a fenced code block each count, with a gap between blocks.
 import { mdHeight, MD } from "./views.js";
 assert.equal(mdHeight("", 600), 21);
+{ // a height is counted once per text and place, then remembered; another width is another place
+  const text = "A paragraph long enough to wrap in a narrow card, with some more words after it.\n\n- one\n- two", was = mdHeight.counted;
+  const a = mdHeight(text, 300), n = mdHeight.counted;
+  assert.equal(n, was + 1); assert.equal(mdHeight(text, 300), a); assert.equal(mdHeight.counted, n, "the second ask counts nothing");
+  assert.ok(mdHeight(text, 120) > a && mdHeight.counted === n + 1, "a narrower place is counted anew");
+}
 assert.equal(mdHeight("One line with `code`.", 600), 21);
 assert.equal(mdHeight("One.\n\nTwo.\n\nThree.", 600), 3 * 21 + 2 * MD.GAP);
 assert.equal(mdHeight("Do this:\n\n- one\n- two\n- three", 600, 20), 20 + MD.GAP + 3 * (20 + MD.ITEM_GAP));
@@ -642,7 +666,7 @@ assert.ok(textW("Loan status model", 12.5) > textW("Model", 12.5));
   assert.equal(crossingsOf({ arch, access: [{ ...access[1], principal: "Somebody else" }] })[0].unmapped, true);
   assert.deepEqual([inProcess({ label: "calls x in-process" }), inProcess({ label: "SQS event source" }), inProcess({ label: "imports x", in_process: false })], [true, false, false]);
   assert.ok(rows.every(crossingChanged));
-  assert.equal(secSentence(rows, 1), "The way in is Api, open to anyone on the internet; its check (token, in the code) holds only if FRONT_DESK_TOKEN is set, and an unresolved high finding says it does not: Token never set. Behind it: mail any member. It also adds or changes 1 right into another zone, 1 call over a trust boundary, 1 call that bypasses a boundary and 1 operator way. 1 of 5 crossings is assessed, 4 not assessed. 1 security finding is unresolved.");
+  assert.equal(secSentence(rows, 1), "The way in is Api, open to anyone on the internet; its check (token, in the code) holds only if FRONT_DESK_TOKEN is set, and an unresolved high finding says it does not: Token never set. Behind it: mail any member. It also adds or changes 1 right into another zone, 1 call over a trust boundary, 1 call that bypasses a boundary and 1 operator way. 1 of 5 crossings is assessed, 4 not assessed. 1 security cause is unresolved.");
   assert.equal(secSentence([], 0), "This PR opens no way in from the public side that the data names. No security finding is unresolved.");
   assert.deepEqual(crossingsOf({}), []);
   // The run's bypasses decide which call in one process is a row; its reach_conflict is shown in its own words.
@@ -761,7 +785,7 @@ assert.ok(textW("Loan status model", 12.5) > textW("Model", 12.5));
   assert.equal(crossingsOf({ arch, access: access.slice(1, 2), gates, threats: threats.slice(1, 3) })[0].result, "not_assessed", "a defect alone assesses nothing");
   assert.equal(wayText(wayOf(rows[2], rows, arch)), "anyone on the internet → ‖ token, in the code → handler → no check: one process → consumer", "way 4 passes gate 1 and starts with the principal");
   assert.equal(wayText(wayOf(rows[0], rows, arch)), "anyone on the internet → ‖ token, in the code → handler → consumer → Mailer");
-  assert.match(secSentence(rows, 2), /All 5 crossings are assessed\. 2 security findings are unresolved\./);
+  assert.match(secSentence(rows, 2), /All 5 crossings are assessed\. 2 security causes are unresolved\./);
   const eff = passZones(new Map([["handler", { trust: "public", drawn: "authenticated" }]]), arch, () => "if crossing 1 fails open");
   assert.deepEqual([...eff].map(([k, v]) => [k, v.trust, v.cond ?? null]), [["handler", "public", null], ["consumer", "public", "if crossing 1 fails open"], ["mailer", "public", "if crossing 1 fails open"]]);
 }
@@ -814,6 +838,53 @@ assert.ok(textW("Loan status model", 12.5) > textW("Model", 12.5));
   assert.deepEqual([...resEdgeMarks(p, [{ edge: "e0", at: "template.yaml:32" }])], [[0, "⏱ 10 s · ↻ no limit"]]);
 }
 
+// ---- Resilience: a dependency's row: its decided cases as words with a mark and the path's number on the page, the
+// undecided ones by name; an unknown path is no link
+{
+  const { resDepRows, resWord } = await import("./views.js");
+  const res = { downstream: [{ dep: "Mailer", kind: "external", mode: "sync", entry: "POST /remind", at: "library/mailer.py:14", card: "mailer", cases: [
+    { when: "slow", handled: "no", how: "waits up to 7 s of the 10 s request.", at: "library/mailer.py:16", effect: "The request hangs.", path: "p3" },
+    { when: "overloaded", handled: "partly", how: "", path: "p8" }, { when: "down", handled: "yes", how: "fails fast", at: "library/mailer.py:19" },
+    { when: "bad_answer", handled: "not_checkable", how: "not in the code" }, { when: "recovers", handled: "not_checkable" }] },
+  { dep: "Tokens", kind: "secret_store", mode: "in_process", cases: [] }] };
+  const rows = resDepRows(res, [{ id: "p1" }, { id: "p3", blocker: { reason: "x" } }]);
+  assert.deepEqual(rows[0].cases.map((c) => [c.text, c.path, c.number, c.blocks]), [["slow: waits up to 7 s of the 10 s request ✗", "p3", 2, true], ["overloaded: partly handled ~", null, null, false], ["down: fails fast ✓", null, null, false]]);
+  assert.deepEqual([rows[0].entry, rows[1].entry, rows[0].cases[0].words, rows[0].cases[0].mark], ["POST /remind", null, "slow: waits up to 7 s of the 10 s request", "✗"]);
+  assert.deepEqual([rows[0].what, rows[0].open, rows[0].at, rows[0].card, rows[1].what, rows[1].cases, rows[1].open], ["external, sync", ["bad answer", "recovers"], "library/mailer.py:14", "mailer", "secret store, in one process", [], []]);
+  assert.deepEqual([resDepRows(null), resDepRows({ paths: [] }), resWord("no_backoff")], [[], [], "retries at once, without backoff"]);
+}
+
+// ---- a cache keeps its newest entries only
+{
+  const { keepLast } = await import("./views.js");
+  const m = new Map([["a", 1], ["b", 2], ["c", 3]]);
+  assert.deepEqual([[...keepLast(m, 2).keys()], [...keepLast(m.set("d", 4), 2).keys()], [...keepLast(new Map(), 2)]], [["b", "c"], ["c", "d"], []]);
+}
+
+// ---- Resilience: a path's second line names at most three things it breaks; a dimmed part stays readable
+{
+  const { resMeta, resFade, mdTarget } = await import("./views.js");
+  const p = { failing: ["unbounded_retry", "no_dlq", "silent", "poison_message", "duplicate_effect", "over_timeout"], wired: { today: "not possible today: nothing publishes" }, blocker: null };
+  assert.deepEqual(resMeta(p, "Queue → consumer", 5), { today: "Not possible today: nothing publishes", text: "Queue → consumer · retries without a limit, no dead-letter queue, a message that always fails and 2 more · 5 findings",
+    tip: "It breaks: retries without a limit, no dead-letter queue, a message that always fails, an effect happens twice, runs over its timeout." });
+  assert.deepEqual(resMeta({ failing: ["no_dlq"], blocker: {}, wired: { today: "x" } }, "", 1), { today: null, text: "no dead-letter queue · 1 finding", tip: null });
+  const dark = { foreground: "#e6e6e6", muted: "#8b8d91", background: "#0f1012", surface: "#17181b" }, lum = (c) => [1, 3, 5].map((k) => parseInt(c.slice(k, k + 2), 16) / 255).map((v) => (v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4)).reduce((s, v, k) => s + v * [0.2126, 0.7152, 0.0722][k], 0);
+  const f = resFade(dark), mix = (fg, bg) => `#${[1, 3, 5].map((k) => Math.round(parseInt(bg.slice(k, k + 2), 16) * (1 - f) + parseInt(fg.slice(k, k + 2), 16) * f).toString(16).padStart(2, "0")).join("")}`;
+  for (const bg of [dark.background, dark.surface]) { const a = lum(mix(dark.muted, bg)), b = lum(bg); assert.ok((Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05) >= 4.4, `dimmed second colour on ${bg}: ${f}`); }
+  assert.ok(f >= 0.55 && f <= 1);
+  assert.match(mdTarget({ tab: "steps", page: "res" }).tip, /when a dependency is slow, overloaded or down/);
+}
+
+// ---- Resilience: a card's marks wrap at words into the card; only the mark that says what breaks is red
+{
+  const { resMarkLines, resMarkRows, RES_MARK_ROW } = await import("./views.js");
+  const text = (ls) => ls.map((l) => l.map((x) => `${x.bad ? "!" : ""}${x.text}`).join(" · "));
+  assert.deepEqual(text(resMarkLines("×3 · ✕ when slow, down, wrong answer · ~ when overloaded", 206)), ["×3 · !✕ when slow, down, wrong", "!answer · ~ when overloaded"]);
+  assert.deepEqual(text(resMarkLines("×3 · ✕ when down", 206)), ["×3 · !✕ when down"]);
+  assert.deepEqual([text(resMarkLines("no DLQ", 30)), resMarkLines("", 206), resMarkLines(null, 206)], [["!no", "!DLQ"], [], []]);
+  assert.equal(resMarkRows(2) * 18, 2 * RES_MARK_ROW.h + RES_MARK_ROW.below + 3, "two lines of marks: two rows and the gap");
+}
+
 // ---- wave R2: the run's own unseen and watch lists, and a probe that dates an unclear blocker
 {
   const { resWatch, resByProbe, resCardOf } = await import("./views.js");
@@ -860,6 +931,10 @@ assert.ok(textW("Loan status model", 12.5) > textW("Model", 12.5));
   assert.deepEqual(at([f("b", "library/status.py", 45, 45)]), [[1, ["b"]], [2, ["b"]]], "two transitions on the same line both");
   assert.deepEqual(at([f("c", "library/reminders.py", 35, 35), f("d", "library/status.py", 39, 39)]), [[5, ["c"]]], "near enough, or none");
   assert.deepEqual(at([f("e", "library/status.py", 46, 50, { breaks: { from: "reminded", to: "returned" } })]), [[4, ["e"]]], "breaks names it");
+  // The analysis' own word (review.py place): breaks.transition, next to a place on the map whose from and to are cards.
+  assert.deepEqual(at([f("g", "library/status.py", 46, 50, { breaks: { from: "reminders", to: "status", edge: "e2", transition: { from: "borrowed", to: "overdue" } } })]), [[1, ["g"]]], "the move it names, not the call on the map and not the nearest line");
+  assert.deepEqual(at([f("h", "library/api.py", 15, 15, { breaks: { node: "api", transition: { to: "returned" } } })]), [[3, ["h"]], [4, ["h"]]], "one end alone: every move into that state, also from another file");
+  assert.deepEqual(at([f("i", "library/status.py", 46, 50, { breaks: { transition: { from: "lost", to: "found" } } })]), [[0, ["i"]]], "a move this diagram does not draw: the nearest line again");
 }
 
 // ---- wave C2: a reproduced probe confirms its path's findings
@@ -890,4 +965,345 @@ assert.ok(textW("Loan status model", 12.5) > textW("Model", 12.5));
   assert.equal(resVerdictParts(ps).head, "1 of 3 paths blocks the merge. 1 path blocks once it is wired.");
   assert.equal(resVerdictParts([ps[1]]).head, "1 path blocks once it is wired.");
   assert.equal(resPathView(ps[1]).wired.reason, "x");
+}
+
+// Copy as Markdown: each page that has the button names what it copies; Files and Comments fall back to the Overview.
+{
+  const { mdTarget } = await import("./views.js");
+  const kind = (x) => mdTarget(x).kind;
+  assert.equal(kind({ tab: "steps", page: "overview" }), "overview");
+  assert.equal(kind({ tab: "steps", page: "arch" }), "arch");
+  assert.equal(kind({ tab: "steps", page: "blast" }), "blast");
+  assert.equal(kind({ tab: "steps", page: "res" }), "res");
+  assert.equal(kind({ tab: "steps", page: null, layer: "Events" }), "layer");
+  assert.equal(kind({ tab: "steps", page: null, layer: null }), "overview", "\"All changes\" is no layer of the analysis");
+  assert.equal(kind({ tab: "steps", page: "arch", layer: "Events" }), "arch", "a page hides the layer behind it");
+  assert.equal(kind({ tab: "findings" }), "findings");
+  assert.equal(kind({ tab: "findings", finding: true }), "finding");
+  assert.equal(kind({ tab: "findings", page: "arch", layer: "Events", finding: true }), "finding", "the Findings tab wins over the page behind it");
+  assert.equal(kind({ tab: "files", page: "arch" }), "overview");
+  assert.equal(kind({ tab: "comments" }), "overview");
+  assert.equal(mdTarget({ tab: "steps", layer: "Events" }).name, 'the layer "Events"');
+  for (const x of [{ tab: "steps", page: "overview" }, { tab: "steps", page: "arch" }, { tab: "steps", page: "blast" }, { tab: "steps", page: "res" }, { tab: "steps", layer: "L" }, { tab: "findings" }, { tab: "findings", finding: true }])
+    assert.match(mdTarget(x).tip, /^Copies .* as Markdown to the clipboard.*Nothing is posted\.$/, "the help says what is copied and that nothing is posted");
+}
+// Relevance in the panel: the space's repo, recent activity, work done, merged/closed known.
+{
+  const { mineGroups, inProgressNow, withPick } = await import("./views.js");
+  const now = Date.parse("2026-11-15T12:00:00Z"), ago = (d) => new Date(now - d * 86400000).toISOString();
+  const prs = [{ url: "a", repo: "o/here", state: "open", updatedAt: ago(1) }, { url: "b", repo: "o/else", state: "open", updatedAt: ago(1) },
+    { url: "c", repo: "o/here", state: "draft", updatedAt: ago(40) }, { url: "d", repo: "o/here", state: "merged", updatedAt: ago(3) },
+    { url: "e", repo: "o/else", state: "closed", updatedAt: ago(20) }, { url: "f", repo: "o/else", state: "merged", updatedAt: ago(1) }];
+  const g = mineGroups(prs, "o/here", now);
+  assert.deepEqual([g.here, g.other, g.done].map((x) => x.map((p) => p.url)), [["a"], ["b", "c"], ["d"]]);
+  assert.deepEqual(mineGroups(prs, null, now).here.map((p) => p.url), ["a", "b"], "outside a GitHub repo: every repo, still only recent");
+  assert.deepEqual(mineGroups(prs, null, now).done.map((p) => p.url), ["d", "f"]);
+  const r = (url, repo, lastDays, progress = {}, status = "in-progress") => ({ url, repo, status, lastTouched: now - lastDays * 86400000, progress });
+  const reg = [r("opened", "o/here", 0, { files: 9, steps: 6 }), r("viewed", "o/else", 1, { filesViewed: 2 }), r("here", "o/here", 2, { comments: 1 }),
+    r("merged", "o/here", 0, { stepsChecked: 1 }), r("old", "o/here", 20, { filesViewed: 1 }), r("sent", "o/else", 3, {}, "sent"), r("done", "o/here", 0, { filesViewed: 1 }, "done")];
+  assert.deepEqual(inProgressNow(reg, { states: new Map([["merged", "merged"]]), slug: "o/here", now }).map((x) => x.url), ["here"],
+    "in a space on a repo: its reviews; only opened, merged, untouched for 14 days and done ones are not in progress");
+  assert.deepEqual(inProgressNow(reg, { states: new Map([["merged", "merged"]]), now }).map((x) => x.url), ["viewed", "here", "sent"], "outside a GitHub repo: every repo's, by last touch");
+  // "Show all" adds the older ones; the merged one is listed apart with its state; nothing with work in it is lost.
+  const { progressRows, inProgressLeft, removedText } = await import("./views.js");
+  const states = new Map([["merged", "merged"]]), rows = progressRows(reg, { states, slug: "o/here", now });
+  assert.deepEqual([rows.shown.map((x) => x.url), rows.more, rows.total], [["here"], 3, 4], "the other repos' reviews and the old one wait behind Show all");
+  const all = progressRows(reg, { states, slug: "o/here", now, all: true });
+  assert.deepEqual([all.shown.map((x) => x.url), all.more], [["here", "old", "viewed", "sent"], 3], "all: the one untouched for 20 days and the other repos too; more says what Show fewer hides");
+  assert.deepEqual(inProgressLeft(reg, states).map((x) => [x.url, x.state]), [["merged", "merged"]]);
+  assert.equal([...rows.shown, ...progressRows(reg, { states, now, all: true }).shown, ...rows.left].some((x) => x.url === "opened" || x.url === "done"), false, "only opened or done: nowhere");
+  assert.equal(removedText({ number: 2, progress: { comments: 2 } }), "#2 removed from In progress. Its 2 pending comments and your progress are kept.");
+  assert.equal(removedText({ number: 7, progress: {} }), "#7 removed from In progress. Your progress is kept.");
+  // The layout shows the panel: its block not hidden, no hidden column around it, up in its stack; null without a block.
+  const { panelShown } = await import("./views.js");
+  const block = { id: "pr", type: "block", content: { mod: "pr-review" } }, bar = { id: "bar", type: "block", content: { mod: "pr-review", props: { part: "bar" } } };
+  const side = (hidden) => ({ id: "root", type: "row", children: [{ id: "main", type: "block" }, { id: "review", type: "column", hidden, children: [block] }] });
+  const stack = (active) => ({ id: "root", children: [{ id: "panel", type: "column", children: [{ id: "panel-body", type: "stack", active, children: [{ id: "files", content: { mod: "files" } }, block] }] }] });
+  assert.deepEqual([panelShown(side(false)), panelShown(side(true)), panelShown(stack("pr")), panelShown(stack("files")), panelShown({ id: "root", children: [bar] }), panelShown(null)],
+    [true, false, true, false, null, null]);
+  const { leftNow } = await import("./views.js");
+  assert.equal(leftNow(new Set(["u2", "u3"]), [{ url: "u2", number: 2, state: "merged" }, { url: "u9", number: 9, state: "closed" }]), "#2 left In progress: its PR was merged.", "only the one that stood there before");
+  assert.equal(leftNow(undefined, [{ url: "u2", number: 2, state: "merged" }]), null, "at mount nothing moved: the dimmed row says it");
+  const sel = withPick(withPick({ a: 1, b: 2 }, "a", 3), "c", 4, 2);
+  assert.deepEqual(sel, { a: 3, c: 4 }, "set again moves to the end; the newest kept");
+  console.log("ok panel relevance");
+}
+{
+  const { touchReview } = await import("./pr.js");
+  const done = [{ url: "u", status: "done", doneAt: 1, lastTouched: 1, progress: { filesViewed: 2 } }];
+  assert.equal(touchReview(done, { url: "u", progress: { filesViewed: 3 } }, 5)[0].status, "in-progress", "opened again after ✕: in progress again");
+  assert.equal(touchReview([{ url: "u", status: "sent", lastTouched: 1 }], { url: "u" }, 5)[0].status, "sent");
+  assert.equal(touchReview(done, { url: "u", status: "done" }, 5)[0].status, "done");
+  console.log("ok touch");
+}
+
+// The Security page on a webhook into one cloud account with an admin script that reaches another (synthetic): a deny
+// rule is a guard, not a right or a crossing; a right on something off the map is no crossing; a call inside an
+// account's frame is a crossing when the run says so; an operator's script and its call are one way; two derived
+// operator ways that say the same are one; the run's own note is the reason a crossing is not assessed; the findings
+// a threat stands on are named next to the ⛨ count; a taken-over principal's rights are by principal.
+{
+  const { crossingsOf, crossingChanged, asideOf, threatCited, blastOf, secSentence, skipText } = await import("./views.js");
+  const { isGuard } = await import("./pr.js");
+  const arch = { groups: [{ id: "out", label: "Senders", kind: "External" }, { id: "acct", label: "Shop account", kind: "Cloud account" }, { id: "ops", label: "Laptop", kind: "Client" }, { id: "org", label: "Org account", kind: "Cloud account" }],
+    zones: [{ id: "z0", name: "Senders", trust: "public" }, { id: "z1", name: "Hook API and function", trust: "public" }, { id: "z2", name: "Topic", trust: "internal" }, { id: "z3", name: "Stores", trust: "data" },
+      { id: "z4", name: "Laptop", trust: "authenticated" }, { id: "z5", name: "Org account: policies", trust: "internal" }],
+    nodes: [{ id: "sender", group: "out", zone: "z0", type: "external", label: "Sender" }, { id: "gw", group: "acct", zone: "z1", label: "Hooks API" }, { id: "fn", group: "acct", zone: "z1", label: "hook fn" },
+      { id: "vault", group: "acct", zone: "z3", label: "Secrets" }, { id: "topic", group: "acct", zone: "z2", label: "Topic" }, { id: "sink", group: "acct", zone: "z3", label: "Sink" },
+      { id: "first", group: "ops", zone: "z4", label: "list.sh" }, { id: "tool", group: "ops", zone: "z4", label: "admin.sh" }, { id: "policies", group: "org", zone: "z5", label: "Policies" }],
+    edges: [{ from: "sender", to: "gw", status: "new" }, { from: "gw", to: "fn", status: "new" }, { from: "fn", to: "vault", status: "new", crosses: true, label: "read the secrets" },
+      { from: "topic", to: "sink", status: "new", crosses: true, label: "archive" }, { from: "tool", to: "policies", status: "new", crosses: true, label: "detach" }] };
+  const row = (id, more) => ({ id, public: false, auth_kind: "iam", change: "added", principal_kind: "role", at: "infra.tf:1", ...more });
+  const access = [row("acc1", { resource: "route", principal: "anyone on the internet", public: true, auth_kind: "code", node: "gw", principal_kind: "internet", principal_node: null }),
+    row("acc2", { resource: "fn-policy", kind: "secret", principal: "fn role", principal_node: "fn", node: "vault", actions: ["secrets:Get"], auth: "IAM" }),
+    row("acc3", { resource: "fn-policy", kind: "log group", principal: "fn role", principal_node: "fn", actions: ["logs:Put"] }),
+    row("acc4", { resource: "topic-policy", principal: "everyone but the fn role", principal_node: null, node: "topic", actions: ["deny events:Put"], auth: "resource policy" }),
+    row("acc5", { resource: "sink-policy", principal: "anyone in the account", principal_node: null, node: "sink", actions: ["store:* without TLS"], effect: "deny" }),
+    row("acc6", { resource: "admin.sh", principal: "operator with org credentials", principal_node: "ops", principal_kind: "operator", node: "tool", actions: ["org:Detach"] }),
+    row("acc7", { resource: "configuration", principal: "operator who deploys Hooks API", principal_node: null, principal_kind: "operator", node: "gw", actions: ["set configuration"], change: "unchanged", derived: true, from_gate: 0, value_from: null }),
+    row("acc8", { resource: "configuration", principal: "operator who deploys Hooks API", principal_node: null, principal_kind: "operator", node: "gw", actions: ["set configuration"], change: "unchanged", derived: true, from_gate: 1, value_from: null })];
+  const threats = [{ id: "t1", where: { access: "acc1" }, threat: "A flood crowds out real senders.", stride: "D", result: "finding", findings: ["flood"] },
+    { id: "t2", where: { access: "acc2" }, threat: "A taken-over fn role reads the secrets.", stride: "I", result: "not_assessed", note: "needs the function first; two secrets only", findings: [] },
+    { id: "t3", where: { access: "acc4" }, threat: "Another principal publishes directly.", stride: "S", result: "mitigated", evidence: "infra.tf:2", findings: [] },
+    { id: "t4", where: { access: "acc6" }, threat: "The operator leaves the policies detached.", stride: "E", result: "finding", findings: ["script"], path: ["ops", "tool", "policies"] },
+    { id: "t5", where: { from: "fn", to: "vault", edge: "e2" }, threat: "No threat was named for this crossing.", result: "not_assessed", derived: true, findings: [] },
+    { id: "t6", where: { from: "topic", to: "sink", edge: "e3" }, threat: "Someone replays the archive.", stride: "T", result: "not_assessed", note: "replay rights are elsewhere", findings: [] }];
+  const findings = [{ id: "flood", ids: ["flood"], severity: "medium", title: "One limit for everyone", impact: "degraded_operation", security: false },
+    { id: "script", ids: ["script"], severity: "medium", title: "The script stops halfway", impact: "edge_case", security: false },
+    { id: "other", ids: ["other"], severity: "high", title: "No timeout", impact: "degraded_operation", security: false }];
+  assert.deepEqual(access.filter(isGuard).map((x) => x.id), ["acc4", "acc5"], "by its effect, or (an older run) by actions that start with deny");
+  const rows = crossingsOf({ arch, access, threats, findings });
+  assert.deepEqual(rows.map((r) => [r.key, r.kind, r.from.name, r.to.name, r.result]), [
+    ["a:acc1", "entry", "anyone on the internet", "Hook API and function", "finding"],
+    ["a:acc6", "operator", "Laptop", "Org account: policies", "finding"],
+    ["a:acc7", "operator", "operator who deploys Hooks API", "Hook API and function", "not_assessed"],
+    ["e:2", "right", "Hook API and function", "Stores", "not_assessed"],
+    ["e:3", "call", "Topic", "Stores", "not_assessed"]], "five crossings: no guard, no right off the map, no second configuration row, the script with its call, the calls inside the account");
+  const op = rows[1], right = rows[3];
+  assert.deepEqual([op.ends, op.aliases, op.identity], [{ from: "tool", to: "policies" }, ["e:4"], "operator with org credentials"], "the way starts at the script's own card, not at the first card of its frame");
+  assert.equal(right.reason, "The run named a threat here and left it open: needs the function first; two secrets only.", "the run's reason, not the placeholder's");
+  assert.equal(rows[4].identity, "Topic", "inside one frame the card says who calls, not the account");
+  const aside = asideOf({ arch, access, threats, findings });
+  assert.deepEqual(aside.guards.map((g) => [g.text, g.threats.map((x) => x.id)]), [
+    ["Guard at Topic: denies events:Put to everyone but the fn role (resource policy, infra.tf:1).", ["t3"]], ["Guard at Sink: denies store:* without TLS to anyone in the account (infra.tf:1).", []]]);
+  assert.deepEqual(aside.rights.map((r) => r.text), ["fn role may logs:Put on fn-policy (log group, infra.tf:1)."], "nothing is lost: the right off the map stands here");
+  assert.deepEqual(threatCited(threats, findings).map((f) => f.id), ["flood", "script"]);
+  const said = secSentence(rows, 0, 2);
+  assert.match(said, /No finding about access or data is unresolved\. 2 other unresolved findings back a threat named here\.$/, said);
+  assert.match(secSentence(rows, 0, 0), /No security finding is unresolved\.$/);
+  assert.equal(rows.filter(crossingChanged).length, 5);
+  assert.deepEqual(blastOf(arch, access).map((b) => b.text), ["If fn role is taken over, it can secrets:Get on Secrets; logs:Put on log group fn-policy."], "by principal behind the way in; no guard, no operator");
+  assert.equal(skipText("git diff not run: Bash denied, read the changed files instead"), "git diff not run: read the changed files instead");
+  assert.equal(skipText("tests not reviewed"), "tests not reviewed");
+  // Second round: a guard says what it holds against (its threat, else the run's own words) and whether the PR
+  // narrows or removes it; the sentence names such guards; an operator's script stands in the operator's zone.
+  const { guardLine } = await import("./views.js");
+  const loose = asideOf({ arch, access: [{ ...access[3], change: "narrowed", holds_against: "another role publishes forged events." }, { ...access[4], change: "removed" }], threats: [] }).guards;
+  assert.deepEqual(loose.map((g) => guardLine(g)), [
+    "Guard at Topic: denies events:Put to everyone but the fn role (resource policy, infra.tf:1). Holds against: another role publishes forged events. This PR narrows it: check what it no longer stops.",
+    "Guard at Sink: denies store:* without TLS to anyone in the account (infra.tf:1). The run does not say what it holds against. This PR removes it: check what it no longer stops."]);
+  assert.equal(guardLine(aside.guards[0], (s) => `<${s}>`), "Guard at Topic: denies events:Put to everyone but the fn role (resource policy, infra.tf:1). Holds against: Another principal publishes directly (mitigated, <infra.tf:2>).");
+  assert.match(secSentence(rows, 1, 0, 2), /It narrows or removes 2 guards\. .*1 security cause is unresolved\.$/);
+  // A finding that is ⛨ only through its threat stands at that threat's crossing: not at every way in that reaches its
+  // line, and it does not say that a way in's check fails.
+  const viaThreat = { ...findings[0], security: true, threats: ["t1"], severity: "high", reachable_from: ["acc1", "acc2"] };
+  const vt = crossingsOf({ arch, access, threats: threats.map((x) => (x.id === "t1" ? { ...x, where: { access: "acc2" } } : x)), findings: [viaThreat] });
+  assert.deepEqual([vt[0].key, vt[0].findings.length, vt.find((r) => r.key === "e:2").findings.length], ["a:acc1", 0, 1]);
+  assert.doesNotMatch(secSentence(crossingsOf({ arch, access, threats, findings: [viaThreat] }), 1), /says it does not/);
+  const opArch = { ...arch, zones: arch.zones.map((z) => (z.id === "z4" ? { ...z, trust: "operator" } : z)) };
+  assert.deepEqual(crossingsOf({ arch: opArch, access, threats, findings })[1].from, { name: "Laptop", trust: "operator" });
+  // The run may put the operator's row at what the script reaches instead of at the script: still one way with the call.
+  const atTarget = crossingsOf({ arch: opArch, access: access.map((x) => (x.id === "acc6" ? { ...x, node: "policies" } : x)), threats, findings }).filter((r) => r.ends.to === "policies");
+  assert.deepEqual(atTarget.map((r) => [r.key, r.kind, r.ends.from, r.aliases]), [["a:acc6", "operator", "tool", ["e:4"]]]);
+  // ... or names the script as the principal and no card at all.
+  const asPrincipal = crossingsOf({ arch: opArch, access: access.map((x) => (x.id === "acc6" ? { ...x, node: undefined, principal_node: "tool" } : x)), threats, findings }).filter((r) => r.ends.to === "policies");
+  assert.deepEqual(asPrincipal.map((r) => [r.key, r.kind, r.ends.from, r.aliases]), [["a:acc6", "operator", "tool", ["e:4"]]]);
+  assert.equal(skipText("git diff (the tool was denied, so I read the files at HEAD)"), "git diff (I read the files at HEAD)");
+  assert.equal(skipText("the shell: not available, so no tests were run"), "no tests were run");
+  console.log("ok guards, operator ways and the findings behind threats");
+}
+
+// The text sizes are the named steps of TYPE (U34): no view sets a size as a bare number, but for the two arrowheads
+// of the state diagram (9 px, drawn marks). A new size is a new step in views.js, with its reason.
+{
+  const { readFileSync } = await import("node:fs");
+  const { TYPE } = await import("./views.js");
+  assert.deepEqual(Object.keys(TYPE), ["micro", "panel", "small", "body", "title", "page", "code", "codePanel"]);
+  for (const f of ["review.js", "stack.js", "main.js", "setup-view.js"]) {
+    const bare = [...readFileSync(new URL(f, import.meta.url), "utf8").matchAll(/text_size\((\d+(?:\.\d+)?)\)/g)].map((m) => m[1]).filter((v) => v !== "9");
+    assert.deepEqual(bare, [], `${f}: text_size with a bare number`);
+  }
+  console.log("ok text sizes");
+}
+
+// "This space": the folders of a space's panes and agents, their branches per repo, one query per repo, its PRs.
+{
+  const { spaceFolders, headBranch, spaceBranches, branchPrQuery, branchPrs, spaceOrder, focusedPr, spaceEmpty } = await import("./views.js");
+  const spaces = [{ id: "s1", tabs: [{ id: "t1" }, { id: "t2" }] }, { id: "s2", tabs: [{ id: "t9" }] }];
+  const panes = [{ tab: "t1", cwd: "/a" }, { tab: "t2", cwd: "/a" }, { tab: "t2", cwd: null }, { tab: "t9", cwd: "/z" }];
+  const terms = [{ address: "t3", labels: { "herdr.space": "s1" }, cwd: "/a", state: "live" }, { address: "t4", parent: "t3", cwd: "/w/fix-1", state: "live" },
+    { address: "t5", parent: "t4", cwd: "/w/fix-2", state: "live" }, { address: "t6", parent: "t3", cwd: "/w/gone", state: "finished" }, { address: "t7", labels: { "herdr.space": "s2" }, cwd: "/z", state: "live" }];
+  assert.deepEqual(spaceFolders("s1", spaces, panes, terms), ["/a", "/w/fix-1", "/w/fix-2"], "panes of its tabs, its terminals and what they started; not a finished one, not another space");
+  assert.deepEqual([headBranch("ref: refs/heads/feat/x\n"), headBranch("9e575d6adf38\n"), headBranch(null)], ["feat/x", null, null]);
+  const co = (cwd, slug, branch, base = "origin/main") => ({ cwd, root: cwd, slug, branch, base });
+  const repos = spaceBranches([co("/a", "o/a", "feat/x"), co("/w/fix-1", "o/a", "fix/1"), co("/b", "o/b", "main"), co("/c", null, "feat/y"), co("/d", "o/a", null), co("/e", "o/a", "feat/x"), co("/f", "o/c", "dev", "origin/dev")]);
+  assert.deepEqual(repos, [{ slug: "o/a", branches: ["feat/x", "fix/1"], roots: { "feat/x": "/a", "fix/1": "/w/fix-1" } }], "no default branch, no detached head, no repo without GitHub; a branch once");
+  const q = branchPrQuery("o/a", ['feat/x', 'we"ird']);
+  assert.ok(q.includes('repository(owner: "o", name: "a")') && q.includes('b0: pullRequests(headRefName: "feat/x"') && q.includes('b1: pullRequests(headRefName: "we\\"ird"'), "one alias per branch, names escaped");
+  const now = Date.parse("2026-11-15T12:00:00Z"), node = (number, state, extra = {}) => ({ number, state, headRefName: "feat/x", ...extra });
+  const got = branchPrs({ data: { repository: { b0: { nodes: [node(3, "MERGED", { mergedAt: "2026-11-14T00:00:00Z" }), node(4, "OPEN"), node(5, "CLOSED"), node(6, "OPEN", { isCrossRepository: true })] },
+    b1: { nodes: [node(7, "MERGED", { mergedAt: "2026-09-01T00:00:00Z" })] } } } }, now);
+  assert.deepEqual(got.map((p) => p.number), [4, 3], "open and merged in the last 14 days; not closed, not a fork's, not merged long ago; open first");
+  assert.deepEqual(branchPrs(null), []);
+  const prs = [{ repo: "o/a", head: "fix/1", state: "open", n: 1 }, { repo: "o/a", head: "old", state: "merged", n: 2 }, { repo: "o/a", head: "feat/x", state: "open", n: 3 }];
+  assert.deepEqual(spaceOrder(prs, { slug: "o/a", branch: "feat/x" }).map((p) => p.n), [3, 1, 2], "the focused pane's PR first, merged last");
+  assert.deepEqual([focusedPr(prs[2], { slug: "o/a", branch: "feat/x" }), focusedPr(prs[2], { slug: "o/b", branch: "feat/x" }), focusedPr(prs[2], null)], [true, false, false]);
+  assert.equal(spaceEmpty([], []), "No pane or agent of this space is in a git repository.");
+  assert.equal(spaceEmpty([co("/c", null, "x")], []), "The repositories of this space have no GitHub remote, so there are no PRs to list.");
+  assert.equal(spaceEmpty([co("/b", "o/b", "main")], []), "Every checkout in this space is on its default branch, so there is no branch to look up a PR for.");
+  assert.equal(spaceEmpty([co("/a", "o/a", "feat/x")], repos), "No open PR for feat/x, fix/1. Choose Current branch below to see the diff.");
+  console.log("ok this space");
+}
+
+// ---- one sign for severity and certainty (signOf, signWords, pageBadge, the risk mark)
+{
+  const { signOf, signWords, sureOf, pageBadge, riskOfCounts, rowMarks, withProbes, signEl, markLabel } = await import("./views.js");
+  const high = { id: "h", severity: "high", certainty: "derived", security: true }, reach = { id: "m", severity: "medium", certainty: "derived", path_certainty: "assumed", security: true };
+  const guess = { id: "g", severity: "medium", certainty: "assumed" }, old = { id: "o", severity: "low" }, ran = { id: "c", severity: "high", certainty: "confirmed" };
+  // How sure one finding is: a finding from before the field is "derived" (no claim), an assumed reach is "assumed".
+  assert.deepEqual([ran, high, reach, guess, old].map(sureOf), ["confirmed", "derived", "assumed", "assumed", "derived"]);
+  // The color is the highest severity; the form is the surest finding of that severity, whatever the lower ones are.
+  assert.deepEqual(signOf([high, reach, guess]), { top: "high", color: "ansi1", form: "plain" });
+  assert.deepEqual(signOf([ran, high]), { top: "high", color: "ansi1", form: "filled" });
+  assert.deepEqual(signOf([reach, guess, old]), { top: "medium", color: "ansi3", form: "open" }, "medium is only assumed, the derived low one does not count");
+  assert.deepEqual(signOf([old]), { top: "low", color: "ansi4", form: "plain" });
+  assert.deepEqual(signOf([{ severity: "critical", certainty: "assumed" }]), { top: "critical", color: "ansi1", form: "open" });
+  assert.deepEqual(signOf([]), { top: null, color: "muted", form: "quiet" });
+  // A probe that reproduced a path confirms its findings (withProbes): the sign is filled and the words say how.
+  const proved = withProbes([high, reach], [{ id: "p1", findings: ["h"], probe: "r1" }], [{ id: "r1", of: "p1", status: "done", result: "reproduced", strength: "runs_pr_code" }]);
+  assert.equal(signOf(proved).form, "filled");
+  assert.equal(signWords(proved), "1 high, confirmed by a probe · 1 medium, assumed reachable");
+  assert.equal(signWords([{ ...ran, probed: { id: "r2", strength: "models_env" } }, ran, guess, old, old]), "1 high, confirmed by a probe, platform modeled · 1 high, confirmed by a run · 1 medium, assumed · 2 low");
+  // A page: color, form, the number, and the tip in words.
+  assert.deepEqual(pageBadge("security", proved, { state: "done", n: 1, unit: "unresolved cause" }),
+    { glyph: "⛨", color: "ansi1", form: "filled", n: 1, state: "open", tip: "Security: 1 unresolved cause. 1 high, confirmed by a probe · 1 medium, assumed reachable." });
+  const res = pageBadge("resilience", [guess], { state: "done", n: 0, unit: "paths block the merge", more: "1 path blocks once wired.", unsure: "2 paths not assessed" });
+  assert.deepEqual([res.glyph, res.color, res.form, res.n, res.state], ["↯", "ansi3", "open", 0, "open"]);
+  assert.equal(res.tip, "Resilience: 0 paths block the merge. 1 medium, assumed. 2 paths not assessed. 1 path blocks once wired.");
+  assert.match(pageBadge("security", [high], { state: null }).tip, /^Security: 1 high, derived\. The Security run did not run\.$/);
+  assert.deepEqual(pageBadge("overview", [high, old]), { glyph: "!", color: "ansi1", form: "plain", n: 2, state: "open", tip: "Overview: 1 high, derived · 1 low." });
+  // Nothing unresolved: a run that did not run has its own quiet sign, a running one too; checked and clean is a
+  // small ✓; clean, but with something left unchecked, is the page's sign in the quiet color. None of them is colored.
+  assert.deepEqual(pageBadge("resilience", [], { state: null }), { glyph: "○", color: "dim", form: "quiet", n: 0, state: "none", tip: "Resilience: not run." });
+  assert.deepEqual([pageBadge("security", [], { state: "failed" }).state, pageBadge("security", [], { state: "failed" }).tip], ["none", "Security: the run failed, so nothing is known."]);
+  assert.deepEqual([pageBadge("security", [], { state: "running" }).glyph, pageBadge("security", [], { state: "running" }).state], ["⋯", "running"]);
+  assert.deepEqual(pageBadge("security", [], { state: "done" }), { glyph: "✓", color: "dim", form: "quiet", n: 0, state: "clean", tip: "Security: checked, nothing unresolved." });
+  assert.deepEqual(pageBadge("resilience", [], { state: "done", unsure: "1 path not assessed" }), { glyph: "↯", color: "dim", form: "quiet", n: 0, state: "quiet", tip: "Resilience: no unresolved finding; 1 path not assessed." });
+  // The risk mark of the panel's rows and of the minimized chip speaks the same way; an entry from before has no form.
+  const risk = riskSignal({ findings: [{ ...ran, impact: "unauthorized_access" }, guess] });
+  assert.deepEqual([risk.form, risk.words], ["filled", "1 high, confirmed by a run · 1 medium, assumed"]);
+  assert.deepEqual(rowMarks(risk, null), [{ text: "⛨ high", security: true, kind: "risk", glyph: "⛨", word: "high", color: "ansi1", form: "filled", words: "1 high, confirmed by a run · 1 medium, assumed" }]);
+  assert.deepEqual(rowMarks(riskOfCounts({ unresolved: 1, medium: 1, security: 1 }, [reach]), null).map((m) => [m.color, m.form, m.words]), [["ansi3", "open", "1 medium, assumed reachable"]]);
+  assert.deepEqual(rowMarks({ top: "high", security: true }, null).map((m) => [m.color, m.form]), [["ansi1", "plain"]]);
+  // The ⛨ speaks of the security findings: a probe that confirmed another finding does not fill it (its words still say so).
+  assert.deepEqual([riskSignal({ findings: [ran, { ...high, impact: "unauthorized_access" }] }).form, riskOfCounts({ unresolved: 2, high: 2, security: 1 }, [ran, high]).form, riskOfCounts({ unresolved: 1, high: 1 }, [ran]).form], ["plain", "plain", "filled"]);
+  assert.deepEqual(rowMarks({ top: "high", security: false, form: "filled" }, null).map((m) => [m.glyph, m.color]), [["", "muted"]], "without ⛨ the word stays grey");
+  // The element: filled puts the color under the glyph, open draws a dashed frame and adds "?", else the glyph alone.
+  const drawn = (sign) => { const calls = []; const el = new Proxy({}, { get: (_, k) => (...a) => { calls.push([k, ...a]); return el; } }); signEl(() => el, { ansi1: "#ff0000", background: "#000000", muted: "#888888" }, sign); return calls; };
+  assert.deepEqual(drawn({ glyph: "⛨", color: "ansi1", form: "filled" }).filter(([k]) => ["bg", "text_color", "child", "border_dashed"].includes(k)), [["bg", "#ff0000"], ["text_color", "#000000"], ["child", "⛨"]]);
+  assert.deepEqual(drawn({ glyph: "⛨", color: "ansi1", form: "open" }).filter(([k]) => ["bg", "child", "border_dashed"].includes(k)), [["border_dashed"], ["child", "⛨?"]]);
+  assert.deepEqual(drawn({ glyph: "↯", color: "ansi1", form: "plain" }).filter(([k]) => ["bg", "text_color", "child", "border_dashed"].includes(k)), [["text_color", "#ff0000"], ["child", "↯"]]);
+  assert.equal(markLabel(() => null, {}, { glyph: "", text: "medium" }), "medium");
+  console.log("ok signs");
+}
+
+// Acceptance, UX 1: the Resilience page says the number its list shows, never the run's id; a ref of a finding that is
+// not stored goes.
+{
+  const { resRefs, resShown } = await import("./views.js");
+  const res = { paths: [{ id: "p1", result: "mitigated", steps: [], findings: [] }, { id: "p2", result: "finding", steps: [], findings: [], wired: { why: "load grows", today: "not possible today: no caller (r_f1) and no SQS publisher (p5)." } },
+    { id: "p5", result: "finding", blocker: { why: "an effect is lost" }, steps: [], findings: [], note: "See path p2; p99 stays." }] };
+  const s = resShown(res);
+  assert.deepEqual(s.paths.map((p) => [p.id, s.nums.get(p.id)]), [["p5", 1], ["p2", 2], ["p1", 3]], "numbered in the page's order");
+  assert.equal(s.paths[1].wired.today, "not possible today: no caller and no SQS publisher (path 1).");
+  assert.equal(s.paths[0].note, "See path 2; p99 stays.", "an id of no path stays, 'path p2' is not said twice");
+  assert.equal(s.say("Exact-day equality and a UTC date; see r_f5."), "Exact-day equality and a UTC date.");
+  assert.equal(resRefs("Nothing publishes (p5), see r_f1 and r_f2.", new Map([["p5", 6]])), "Nothing publishes (path 6).");
+  assert.equal(resShown(null).paths.length, 0);
+  console.log("ok resilience ids as numbers");
+}
+
+// Acceptance, UX 3: among the crossings a finding stands in full once, later crossings refer to the first by its number.
+{
+  const { crossOnce } = await import("./views.js");
+  const f1 = { id: "f1" }, f2 = { id: "f2" }, rows = [{ key: "a:1", findings: [f1, f2] }, { key: "e:3", findings: [] }, { key: "e:4", findings: [f2, { id: "f3" }] }];
+  const once = crossOnce(rows, (r) => rows.indexOf(r) + 10);
+  assert.deepEqual([...once].map(([k, v]) => [k, v.first.map((f) => f.id), v.again.map((x) => [x.f.id, x.at])]), [["a:1", ["f1", "f2"], []], ["e:3", [], []], ["e:4", ["f3"], [["f2", 10]]]]);
+  assert.equal(crossOnce(null).size, 0);
+  console.log("ok crossings name a finding once");
+}
+
+// Acceptance, UX 4: old or new is said once. A path the diff dates keeps its word, and its probe says only what the
+// script did on the base; a path the diff could not date takes the probe's verdict.
+{
+  const { probeBaseWord, datedByDiff, resByProbe } = await import("./views.js");
+  const W = { already_on_base: "already on the base", new_in_pr: "new in this PR", unknown: "unknown on the base", not_on_base: "not on the base" };
+  const probe = { id: "r1", of: "p4", status: "done", result: "reproduced", base: { status: "script_failed", verdict: "new_in_pr", line: "import failed: ImportError" } };
+  const old = { id: "p4", pre_existing: true, blocker: null }, unclear = { id: "p4", pre_existing: "unknown", blocker: { reason: "x", unclear: true } };
+  assert.ok(datedByDiff(old) && datedByDiff({ pre_existing: false }) && !datedByDiff(unclear) && !datedByDiff(resByProbe([unclear], [probe])[0]) && !datedByDiff(null));
+  assert.deepEqual(probeBaseWord(probe, datedByDiff(old), W), { dates: false, word: "the script could not run there" }, "the path says already on the base, the probe not 'new in this PR'");
+  assert.equal(probeBaseWord({ base: { status: "not_reproduced", verdict: "new_in_pr" } }, true, W).word, "the script could not run there", "an import that failed on the base is not 'not reproduced'");
+  assert.deepEqual(probeBaseWord(probe, datedByDiff(resByProbe([unclear], [probe])[0]), W), { dates: true, word: "new in this PR" }, "the probe dates a path the diff could not");
+  assert.deepEqual(probeBaseWord({ base: { status: "reproduced", verdict: "already_on_base" } }, true, W), { dates: false, word: "breaks the same way" });
+  assert.deepEqual([probeBaseWord({ base: { status: "new_in_pr" } }, false, W).word, probeBaseWord({ base: { status: "new_in_pr" } }, true, W).word, probeBaseWord({ base: "x" }, false, W), probeBaseWord({}, false, W)], ["new in this PR", "the script could not run there", null, null]);
+  console.log("ok old or new is said once");
+}
+
+// ---- the panel's diff list: a card's buttons are hit where they are drawn, at any zoom and width
+{
+  const { panelButtons, panelZones, panelHit, panelPress, PANEL_EDGE } = await import("./views.js");
+  const presets = ["Explain", "Look up docs"];
+  const cards = [["ca", { editing: false, presets }, ["cancel", "comment", "ask"]], ["ca", { editing: true, presets }, ["cancel", "comment"]], ["ch", { editing: false, presets }, ["preset:0", "preset:1"]],
+    ["ch", { editing: true, presets }, []], ["bh", { editing: false, presets }, ["edit", "delete"]]];
+  for (const [kind, o, keys] of cards) {
+    const { gap, list } = panelButtons(kind, o);
+    assert.deepEqual(list.map((b) => b.key), keys, `${kind}: its buttons, left to right`);
+    assert.ok(list.every((b) => Number.isFinite(b.w) && b.w >= 30), `${kind}: stated widths`);
+    for (const zoom of [0.9, 1, 1.25]) for (const w of [300, 380, 560]) {
+      // The layout the element gets: fixed widths in a row that ends PANEL_EDGE before the list's right edge, `gap`
+      // between them. Walked from the right here, button by button, without panelZones.
+      let right = w - PANEL_EDGE;
+      for (let k = list.length - 1; k >= 0; k--) {
+        const x1 = right, x0 = right - list[k].w, at = (x) => { const p = panelPress(x * zoom, w * zoom, zoom, 0); return panelHit(kind, p.x, p.w, o); }; // a press arrives in logical px
+        for (const x of [x0 + 0.5, (x0 + x1) / 2, x1 - 0.5]) assert.equal(at(x), list[k].key, `${kind} ${list[k].key} at ${x} of ${w}, zoom ${zoom}`);
+        assert.equal(at(x0 - gap / 2), null, `${kind}: the gap left of ${list[k].key} is no button (zoom ${zoom})`);
+        right = x0 - gap;
+      }
+      assert.equal(panelHit(kind, 20, w, o), null, "the card's label is no button");
+      assert.equal(panelHit(kind, w - PANEL_EDGE + 0.5, w, o), null, "nor is its padding at the right");
+      const z = panelZones(kind, w, o);
+      assert.ok(z.every((b, k) => b.x1 - b.x0 === list[k].w && (k === 0 || Math.abs(b.x0 - z[k - 1].x1 - gap) < 1e-9)) && (z.length === 0 || z.at(-1).x1 === w - PANEL_EDGE), `${kind}: the zones are the widths, a gap apart, flush right`);
+    }
+  }
+  assert.deepEqual(panelPress(171, 342, 0.9, 380), { x: 190, w: 380 }); // logical px at zoom 0.9 are the items' px times 0.9
+  assert.deepEqual(panelPress(undefined, undefined, undefined, 380), { x: 0, w: 380 }, "a press without a place (a command): the panel's own width");
+  console.log("ok panel zones");
+}
+
+
+{ // a card's place, for "↗ editor"
+  const { placeOf } = await import("./views.js");
+  assert.deepEqual(["a/b.py:9-14", "a/b.py:9:3", "a/b.py", "a/b.py:9", "", null].map(placeOf), [{ file: "a/b.py", line: 9 }, { file: "a/b.py", line: 9 }, { file: "a/b.py", line: null }, { file: "a/b.py", line: 9 }, null, null]);
+  console.log("ok place");
+}
+
+// A file head's path to drag onto a terminal: the file in the local checkout, and only one that is the checkout's own.
+{
+  const { dragPath } = await import("./views.js");
+  const link = ["diff --git a/l b/l", "new file mode 120000", "index 0000000..1de5659"];
+  assert.equal(dragPath("/co/r", { path: "src/a b.ts", status: "modified", lines: [] }), "/co/r/src/a b.ts");
+  assert.equal(dragPath("/co/r/", { path: "./src/../a.ts", status: "added" }), "/co/r/a.ts");
+  assert.deepEqual([dragPath(null, { path: "a.ts" }), dragPath("/co/r", { path: "a.ts", status: "deleted" }), dragPath("/co/r", { path: "l", status: "added", lines: link }),
+    dragPath("/co/r", { path: "/etc/passwd" }), dragPath("/co/r", { path: "../../etc/passwd" }), dragPath("/co/r", null)], [null, null, null, null, null, null]);
+  console.log("drag path ok");
 }

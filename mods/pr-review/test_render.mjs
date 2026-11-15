@@ -19,7 +19,7 @@ function review(files) {
     const n = 5 + ((i * 37) % 120);
     text += `diff --git a/src/f${i}.ts b/src/f${i}.ts\n--- a/src/f${i}.ts\n+++ b/src/f${i}.ts\n@@ -1,${n} +1,${n} @@\n${"+x\n".repeat(n)}`;
   }
-  v.prSel = target; v.patch = files ? splitPatch(text) : [];
+  v.prSel = target; v.resumed = target.url; v.patch = files ? splitPatch(text) : []; // resumed: where you were is known (render holds its frame until then)
   v.hunks = hunksOf(v.patch).map((h) => ({ ...h, rows: diffRows(h.lines) }));
   v.byId = new Map(v.hunks.map((h) => [h.id, h])); v.fileHunks = new Map();
   for (const h of v.hunks) v.fileHunks.set(h.path, [...(v.fileHunks.get(h.path) ?? []), h]);
@@ -216,3 +216,46 @@ globalThis.__rv.store.set("review.minimized", { target: { url: "https://github.c
 renderMini();
 globalThis.__rv.store.set("review.minimized", null);
 console.log("render ok");
+
+// A state diagram over a layer's code: each transition's number and trigger is in the picture, a finding's chip stands
+// after the label of the transition it names, the legend names the kinds of line this picture has; where the card is
+// too narrow for the texts, the numbers alone.
+{
+  const { visualCard } = await import("./stack.js");
+  const T = (from, to, event, more = {}) => ({ from, to, event, changed: true, ...more });
+  const v = { kind: "state_machine", title: "Loan", nodes: ["borrowed", "reminded", "overdue", "returned"].map((id) => ({ id, label: id })),
+    transitions: [T("borrowed", "reminded", "loan.reminded"), T("borrowed", "overdue", "loan.overdue", { guard: "allowed by MOVES" }), T("reminded", "overdue", "loan.overdue"), T("borrowed", "returned", "loan.returned", { changed: false }), T("overdue", "overdue", "publish_overdue")] };
+  const marks = new Map([[1, { severity: "high", findings: [{ id: "x", title: "always raises" }] }]]);
+  const drawn = (wide) => { S.texts = new Set(); S.ids = new Set(); ok(`a state diagram at ${wide}`, () => visualCard(v, S.theme, "sd", null, null, wide, { bare: true, marks })); const got = { texts: [...S.texts], ids: [...S.ids] }; S.texts = S.ids = null; return got; };
+  const wide = drawn(900), narrow = drawn(300);
+  for (const x of ["1 · loan.reminded", "2 · loan.overdue", "3 · loan.overdue", "4 · loan.returned", "5 · publish_overdue", "High · 1", "Changed in this PR", "Unchanged", "Has a finding"]) assert.ok(wide.texts.includes(x), `${x} is in the picture`);
+  assert.ok(!wide.texts.includes("Spec only") && wide.ids.includes("sd-sv-l2-m"), "the chip is part of transition 2's label");
+  assert.ok(["1", "2", "3", "4", "5", "High · 1"].every((x) => narrow.texts.includes(x)) && !narrow.texts.includes("2 · loan.overdue"));
+  console.log("state diagram labels ok");
+}
+
+// Tabs the review opens: named "<repo> <context>"; "Ask an agent" without a live agent starts its tab in the
+// background (the review shows no terminals: the shown space and tab stay), a resumed session takes the focus (the
+// finding is pasted there).
+{
+  const { tabName } = await import("./pr.js");
+  assert.deepEqual([tabName("acme/bookshelf", "PR #7"), tabName("/code/bookshelf", "review"), tabName(null, "ask")], ["bookshelf PR #7", "bookshelf review", "ask"]);
+  const now = { ...cx, spawn(fn) { fn(now); } }, v = review(1);
+  S.runs = [];
+  v.askPlan = () => ({ kind: "new", where: "/h/w" }); v.discussNow("why?", now);
+  v.prSel = { ...v.prSel, session: "s1", cwd: "/h/c" }; v.askPlan = () => ({ kind: "resume", where: "/h/c" }); v.discussNow("why?", now);
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(S.runs.map(([c, a]) => [c, a.name, a.focus]), [["tab.new", "r ask PR #1", false], ["tab.new", "r PR #1", undefined]]);
+  S.runs = null;
+  console.log("tab names and focus ok");
+}
+
+// A file head in the big diff drags as the file's path in the review's checkout; without a checkout nothing drags.
+{
+  const v = review(2), heads = () => { S.drags = []; ok("file heads", () => { v.render(cx); layout(0); }); const d = S.drags; S.drags = null; return d; };
+  v.tab = "files"; v.collapsed = new Set();
+  assert.deepEqual(heads(), [], "no checkout: no path to drag");
+  v.worktree = { url: v.prSel.url, head: "h", path: "/h/w" };
+  assert.deepEqual(heads(), ["/h/w/src/f0.ts", "/h/w/src/f1.ts"]);
+  console.log("drag paths ok");
+}

@@ -2,7 +2,7 @@
 // as threads under their lines (pr-data/threads.json, per PR, bounded), the agent answers each by id in
 // pr-data/replies/<pr hash>.jsonl, GitHub replies come from its review comments. Plus what a GitHub submit posts
 // (exactly the ticked items) and the preview before anything is typed into an agent's session.
-import { hash, ghReview, lineLabel, answerIn } from "./pr.js";
+import { hash, ghReview, lineLabel, answerIn, secByEffect } from "./pr.js";
 
 export const MAX_PRS = 50, MAX_THREADS = 100;
 export const STATUSES = ["fixed", "answered", "wontfix", "question"];
@@ -147,8 +147,16 @@ export const fixFor = (doc, key, id) => [...fixesOf(doc, key)].reverse().find((f
 
 // A fix branch per job: fix/<pr number>-<first item>.
 export const fixBranch = (number, ids) => `fix/${number ?? "pr"}-${String(ids[0] ?? "x").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 12)}${ids.length > 1 ? `-and-${ids.length - 1}` : ""}`;
-// Where its worktree goes (Herdr's convention for worktrees): ~/.herdr/worktrees/<repo>/<branch with - for />.
-export const fixPath = (home, repo, branch) => `${home}/.herdr/worktrees/${String(repo ?? "repo").split("/").pop()}/${branch.replace(/\//g, "-")}`;
+// Herdr's folder for worktrees: `worktrees.directory` of its settings.json (the file's text; an absolute path, `~` or
+// `~/…`), else ~/.herdr/worktrees. The same folder Herdr's own New worktree uses, so every checkout sits in one place.
+export function worktreesDir(settingsText, home) {
+  let dir = null;
+  try { dir = JSON.parse(settingsText ?? "null")?.worktrees?.directory; } catch { /* a broken file: the default */ }
+  dir = typeof dir === "string" ? dir.trim().replace(/^~(?=\/|$)/, home).replace(/(?<=.)\/+$/, "") : "";
+  return dir.startsWith("/") ? dir : `${home}/.herdr/worktrees`;
+}
+// Where its worktree goes (Herdr's convention for worktrees): <worktrees folder>/<repo>/<branch with - for />.
+export const fixPath = (dir, repo, branch) => `${dir}/${String(repo ?? "repo").split("/").pop()}/${branch.replace(/\//g, "-")}`;
 
 // Where a fix branch starts: at the PR's head (the commit the review shows), not at whatever the local clone has
 // checked out, which may be another branch. A space's own branch diff has no head apart from its checkout.
@@ -215,10 +223,11 @@ export function fixCommentsPrompt({ pr, comments, file, lang, branch = null, pat
 // hc run for the sub-agent: under the PR's agent (parent) so it shows there, in its worktree, on the PR's context
 // (env: the context's command prefix), no notes typed into the parent.
 // model: the review's model (pr.js codeModel), said outright so the account's default (maybe Haiku) never fixes code.
-// kind: "fix" or "verify" (the label); deny: the rules refused in any mode (a verify agent: NO_NET).
-export function subAgentArgs({ parent, cwd, name, env = [], task, job, auto = false, model = "sonnet", kind = "fix", deny = NO_PUSH }) {
+// kind: "fix" or "verify" (the label); deny: the rules refused in any mode (a verify agent: NO_NET); lock: the push
+// lock for the clone's remotes (noPushEnv, checked by the caller).
+export function subAgentArgs({ parent, cwd, name, env = [], task, job, auto = false, model = "sonnet", kind = "fix", deny = NO_PUSH, lock = NO_PUSH_ENV }) {
   return ["run", "--bg", "--json", "--no-notify", "--name", name, "--cwd", cwd, ...(parent ? ["--parent", parent] : ["--no-parent"]),
-    "--label", `pr-review.${kind}=${job}`, "--", ...NO_PUSH_ENV, ...env, "claude", "--model", model, ...NO_MCP, "--disallowedTools", ...deny, ...permissionArgs(auto), task];
+    "--label", `pr-review.${kind}=${job}`, "--", ...lock, ...env, "claude", "--model", model, ...NO_MCP, "--disallowedTools", ...deny, ...permissionArgs(auto), task];
 }
 // A new Claude tab that gets PR text: "Ask an agent…" (a question about a finding) and "Send review" (the comments
 // to a new session). No MCP servers, as for every agent that reads PR text. ask: Ask's permission mode by trust (a
@@ -232,12 +241,32 @@ export const NO_MCP = ["--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}
 // and these deny rules refuse the commands in any permission mode, also in the usual wrappers (git -C, git -c, env,
 // sh -c). The list takes any number of rules, so an option with one value has to follow it (permissionArgs).
 export const NO_PUSH = ["Bash(git push)", "Bash(git push *)", "Bash(git -C * push*)", "Bash(git -c * push*)", "Bash(env * git push*)",
-  "Bash(sh -c *git push*)", "Bash(bash -c *git push*)", "Bash(zsh -c *git push*)", "Bash(gh pr create *)", "Bash(gh pr merge *)", "Bash(hc send *)"];
-// Under the rules, git itself: every push URL of the agent's git (an empty pushInsteadOf matches every URL) becomes
-// one no git can open, however the push is called (a script, sh -c, git -C). Fetch is untouched.
-// ponytail: an environment, not a sandbox: a program that clears it, or a push through the API (gh api, curl), still
-// gets out; the preview says so (sendFacts "Push").
-export const NO_PUSH_ENV = ["env", "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=url.pushing-is-off-in-this-review://.pushInsteadOf", "GIT_CONFIG_VALUE_0="];
+  "Bash(sh -c *git push*)", "Bash(bash -c *git push*)", "Bash(zsh -c *git push*)", "Bash(git send-pack *)", "Bash(git http-push *)",
+  "Bash(gh pr create *)", "Bash(gh pr merge *)", "Bash(hc send *)"];
+// Under the rules, git itself, however the push is called (a script, sh -c, git -C). Fetch is untouched. Two parts,
+// because git rewrites a push URL with pushInsteadOf only where the remote has no pushurl of its own:
+// - an empty pushInsteadOf matches every URL and turns it into one no git can open: every remote without a pushurl,
+//   a remote the agent adds, a URL given on the command line;
+// - each remote of the clone (remotes: `git remote`) gets its pushurl emptied and set to that same dead URL (git 2.46
+//   and later: an empty value clears the list), so a pushurl in the clone's or the user's config does not count.
+// Whether it holds is asked of git itself before an agent starts (pushLockProbe, pushLockOpen): an older git, or a
+// remote this cannot cover, stops the start instead of leaving a way out.
+// ponytail: an environment, not a sandbox. What the agent sets against it on purpose still gets out: a push URL of
+// its own (git -c, git remote set-url --push), a cleared environment, git's plumbing (send-pack), a push through
+// the API (gh api, curl); the preview says so (sendFacts "Push"). A sandbox without network would close those.
+export const PUSH_OFF = "pushing-is-off-in-this-review://";
+export function noPushEnv(remotes = []) {
+  const pairs = [[`url.${PUSH_OFF}.pushInsteadOf`, ""], ...remotes.flatMap((r) => [[`remote.${r}.pushurl`, ""], [`remote.${r}.pushurl`, `${PUSH_OFF}${r}`]])];
+  return ["env", `GIT_CONFIG_COUNT=${pairs.length}`, ...pairs.flatMap(([k, v], i) => [`GIT_CONFIG_KEY_${i}=${k}`, `GIT_CONFIG_VALUE_${i}=${v}`])];
+}
+export const NO_PUSH_ENV = noPushEnv(); // no remote known: the first part alone
+// The question to git (argv after the lock's env, run in the agent's checkout): where each remote would push now.
+export const pushLockProbe = (remotes) => ["sh", "-c", 'for r in "$@"; do git remote get-url --push --all "$r" || echo "?"; done', "sh", ...remotes];
+// Its answer → the remotes git would still push to (a line that is not the dead URL, or fewer lines than remotes: "?").
+export function pushLockOpen(stdout, remotes) {
+  const lines = String(stdout ?? "").split("\n").filter(Boolean), open = lines.filter((l) => !l.startsWith(PUSH_OFF));
+  return lines.length < remotes.length || open.length ? (open.length ? open : ["?"]) : [];
+}
 // A trusted PR: auto (the classifier approves the harmless commands, reads, edits, commit, tests, and asks about risky
 // ones). An untrusted one: the task quotes its text and findings, which may carry injected instructions, and its
 // checkout's .claude/settings.json could allow anything or run hooks, so: manual, said outright (not left to the
@@ -346,7 +375,7 @@ export function sendFacts({ kind, account, trusted = false, branch = null, name 
     ["Runs as", own ? `${account}${model ? ` · ${model}` : ""}` : `${name ?? "The PR's session"}, on its own account and with its own permissions.`],
     ["Gets", own ? "The text below and every file it opens in its checkout. All of it goes to the provider." : "The text below. The session reads what it needs in its own checkout."],
     ["May", may],
-    ["Push", own && kind !== "new" ? `Not through git: the agent's git cannot push anywhere, however it is called, and git push and gh pr create are denied${kind === "verify" ? ", as are web tools and the plain network commands (curl, wget, git fetch, installs)" : ""}. The task forbids it too. Not covered: a program that clears its environment, or a push through the GitHub API (gh api, curl)${kind === "sub" && trusted ? ", which auto mode may run without asking" : ""}.` : kind === "new" ? "Only if you approve the command." : "Possible. Nothing here prevents it."],
+    ["Push", own && kind !== "new" ? `Not through git push: every remote of the checkout, also one with a push URL of its own, and every URL given to git push lead to an address no git can open, whatever calls git push. This is checked before the agent starts. git push, git send-pack and gh pr create are denied${kind === "verify" ? ", as are web tools and the plain network commands (curl, wget, git fetch, installs)" : ""}. The task forbids it too. Not covered: what the agent sets against it on purpose (a push URL of its own through git -c or git config, a cleared environment), git send-pack inside a script, or a push through the GitHub API (gh api, curl)${kind === "sub" && trusted ? "; auto mode may run these without asking" : ""}.` : kind === "new" ? "Only if you approve the command." : "Possible. Nothing here prevents it."],
     ["Result", result],
     // The CLI caps spending only for non-interactive runs (--max-budget-usd needs --print); these agents work in a tab.
     ["Cost", own ? `No spending limit: the CLI caps only non-interactive runs, and this agent works in a tab. Stop it there.${estimate ? ` One finding usually costs ${estimate}${model ? ` on ${model}` : ""}.` : kind === "verify" ? " One finding usually takes a few minutes." : ""} Billed to that account.` : "Billed to that session's account."],
@@ -373,7 +402,7 @@ export function blockersDraft(findings) {
   const high = (findings ?? []).filter((f) => f.severity === "high" || f.severity === "critical"), n = high.length;
   if (!n) return "";
   return `${n} ${n === 1 ? "finding needs" : "findings need"} a change before this can merge.\n\n`
-    + high.map((f) => (f.security ? `- Security: ${f.title}` : `- \`${f.file}:${f.line}\`: ${f.title}`)).join("\n");
+    + high.map((f) => (secByEffect(f) ? `- Security: ${f.title}` : `- \`${f.file}:${f.line}\`: ${f.title}`)).join("\n");
 }
 
 // ---- the "Run review" popup: one line per run
@@ -496,7 +525,8 @@ const SILENT = /\b(silent|silence|unseen|no signal|no log|no alarm|swallow)/i;
 
 // The task for one probe of the resilience run (p: {id, claim, kind, of, at?, signal?}): the claim to show, how the
 // review runs the script, the rules for it (stubs for every side effect, a virtual clock, forced interleaving with a
-// Barrier, never sleep, both signatures where head and base differ, the silence itself for a silent path) and the
+// Barrier, never sleep, both signatures where head and base differ, the silence itself for a silent path, a stub that
+// plays the fault of a dependency on a virtual clock for a probe of the kind downstream) and the
 // answer line. context: the review's view of the PR (claims, not orders).
 export function probePrompt({ pr, head, probe: p, path, context = "", lang = null }) {
   probeId(p?.id);
@@ -505,6 +535,7 @@ export function probePrompt({ pr, head, probe: p, path, context = "", lang = nul
     `Claim [${p.id}] (${p.kind ?? "probe"}${p.at ? `, ${p.at}` : ""}): ${String(p.claim ?? "").replace(/\s+/g, " ").trim()}`,
     `You work in your own git worktree ${path}, checked out at that head. Write the script to ${path}/${PROBE_DIR}/${p.id}.py. You do not run it: you have no shell. When you are done, the review runs it in a sandbox: on an export of the commit in an empty folder, with python3 -I and that folder as sys.argv[1], without network, environment or access to the home, for at most 30 s, and once more on the base commit of the PR. So read the code carefully and write the script so it runs the first time.`,
     `Rules for the script: import the PR's code from sys.argv[1]. Replace every side effect (mail, queue, HTTP, database, clock) with a stub that counts. Use a virtual clock, never time.sleep. Force an interleaving with threading.Barrier, never rely on timing. Where a function's signature differs between the PR and its base, call it through inspect.signature so the script serves both. If it plays a part of the platform itself (for example a queue redelivering a batch or a scheduler skipping a day), say so in a line of code at module level, not in a docstring or comment: MODELS_ENV = "<what it plays>". Keep it short and standard library only.`,
+    p.kind === "downstream" && `This claim is about a dependency that is slow, overloaded, down or answers wrong. Play that fault with a stub in place of the dependency's client, without network and without real waiting. Slow: the stub advances a virtual clock by its latency; replace time.sleep, time.time and time.monotonic in the PR's modules with that clock, so every wait and backoff costs virtual time only. Overloaded: the stub raises or returns what throttling looks like to this code (HTTP 429 or 503, the SDK's throttling error). Down: a connection error. A wrong answer: an empty or partial response. Count the calls the stub gets and the virtual seconds the caller spends, and reproduce with that number ("7 s of virtual time in one request against its 10 s timeout", "3 calls within 0 s after a 429").`,
     silent && `This claim is about a failure nobody sees. Show the silence, not only the failure: attach a logging.Handler to the root logger at level DEBUG that keeps every record, also count what goes to stdout and stderr, run the failing path, and reproduce if nothing at WARNING or above was logged and no exception came out of it.`,
     `Its last line says the result: "reproduced <the one number or fact that shows it>" (exit 0) or "not_reproduced <what you saw instead>" (exit 1).`,
     `Rules for you: nothing but reading files and writing that one script; everything else is refused. No network, never push.`,
@@ -530,12 +561,24 @@ const toolTalk = (s) => /\b(bash|denied|permission|tool|dontask|don't ask|allowe
 // probe's or not readable: script_failed, because the script was there and ran.
 // → {state: "done", status, strength, line, base {status, line, rev, verdict} | null, pre_existing, network_barrier,
 // head, ms, output, reason, script, at}.
-export function probeOutcome(id, { result = null, answer = null, script = "", at = Date.now() } = {}) {
+// Before a probe agent starts in its worktree (argv for sh): its probe folder and its answer file are removed,
+// whatever they are, and the folder is made new. rm removes a link itself, never what it points to.
+export const probeFresh = (path) => ["-c", 'rm -rf -- "$1" "$2" && mkdir -- "$1"', "sh", `${path}/${PROBE_DIR}`, `${path}/${VERIFY_FILE}`];
+// What the review takes from one call of probe.py ({code, stdout, stderr}, or null when it gave nothing): the result
+// and the script as the runner printed them, or why it ran nothing (refused: exit 2 with its reason, e.g. a script
+// that is a link; "" when there is no script, exit 3). The review reads no file of the agent's folder itself.
+export function probeRan(ran) {
+  let result = null;
+  try { result = ran?.code === 0 ? JSON.parse(ran.stdout) : null; } catch { result = null; }
+  const refused = result || ran?.code === 3 ? "" : ran?.code === 2 ? short(String(ran.stderr ?? "").replace(/^probe: refused:\s*/, ""), 200) : "the runner gave no result";
+  return { result, script: String(result?.script ?? ""), refused };
+}
+export function probeOutcome(id, { result = null, answer = null, script = "", refused = "", at = Date.now() } = {}) {
   let r = null;
   try { r = typeof result === "string" ? JSON.parse(result) : result; } catch { r = null; }
   if (r && (r.id !== id || !PROBE_STATUS.includes(r.status))) r = null;
   const said = answer?.reason && !toolTalk(answer.reason) ? answer.reason : "";
-  if (!String(script ?? "").trim()) return { state: "done", status: "not_run", strength: null, line: said ? `No script: ${said}` : "The agent wrote no script for this claim.", base: null, pre_existing: false,
+  if (!String(script ?? "").trim()) return { state: "done", status: "not_run", strength: null, line: refused ? `Not run: ${refused}.` : said ? `No script: ${said}` : "The agent wrote no script for this claim.", base: null, pre_existing: false,
     network_barrier: false, head: null, ms: 0, output: "", reason: said, script: "", at };
   const base = r?.base ? { status: PROBE_STATUS.includes(r.base.status) ? r.base.status : "script_failed", line: short(r.base.line, 300), rev: short(r.base.rev, 40),
     verdict: BASE_WORDS[r.base.verdict] ? r.base.verdict : "unknown" } : null;
@@ -553,5 +596,28 @@ export const TRUST_TURNS_ON = [
   "Probes start without asking you, in their sandbox (no network, nothing from your home).",
   "The security review starts by itself when the diff gives reasons for one.",
   "Language servers for go-to-definition run code from the repository: build scripts, proc macros, its own TypeScript, downloads.",
+  "The Codex review starts on your click without asking first. It sends the PR's code and text to a second provider (OpenAI).",
 ];
+// What a Codex run may do (reviewers.py codex_args), word for word in the Reviews popup and before the run.
+export const CODEX_MAY = "Reads: the PR checkout and its clone's .git folder, nothing else on this machine. Writes: nothing. Network: Codex itself reaches its provider, the commands it runs reach nothing. MCP servers, hooks, plugins, apps and Codex config, yours and the PR's: off.";
+// Someone else's PR in Restricted Mode: the first click on Codex review shows this, the second runs it.
+export const CODEX_ASK = `This PR is by someone else. Codex would send its code and text to a second provider (OpenAI), and that text may carry instructions for it. ${CODEX_MAY} Click Codex review again to run it.`;
 
+
+// ---- fix worktrees left on disk (review.js "Fix worktrees…": listed on a click, removed on a click, never on their own)
+// `git worktree list --porcelain` → the worktrees under Herdr's folders for this repo (<dir>/<repo>/ for each of
+// dirs: the folder set now and the default one, where earlier fixes may sit) that are on a fix/ or verify/ branch:
+// [{path, branch}].
+export function leftWorktrees(porcelain, dirs, repo) {
+  const roots = dirs.map((d) => `${d}/${String(repo ?? "").split("/").pop()}/`);
+  return String(porcelain ?? "").split(/\n\n+/).map((b) => ({ path: /^worktree (.+)$/m.exec(b)?.[1], branch: /^branch refs\/heads\/(.+)$/m.exec(b)?.[1] }))
+    .filter((w) => roots.some((r) => w.path?.startsWith(r)) && /^(fix|verify)\//.test(w.branch ?? ""));
+}
+// Removing it would lose work: commits no other branch or remote has (only), changes not committed (dirty), or git
+// could not say (unknown). Such a worktree takes a second click.
+export const worktreeRisky = (w) => Boolean(w.only || w.dirty || w.unknown);
+// Its line in the menu: "Remove fix/2-a1 · 2 commits only there · uncommitted changes"; asked: the second click.
+export function worktreeLine(w, asked = false) {
+  const facts = [w.only ? `${w.only} ${w.only === 1 ? "commit" : "commits"} only there` : null, w.dirty ? "uncommitted changes" : null, w.unknown ? "could not be checked" : null].filter(Boolean);
+  return `${asked ? "Remove anyway" : "Remove"} ${w.branch}${facts.length ? ` · ${facts.join(" · ")}` : " · nothing only there"}`;
+}

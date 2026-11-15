@@ -11,6 +11,9 @@
 HTTP on 127.0.0.1 only; every request needs the header X-Bridge-Token (the token is in pr-data/lsp-bridge.json,
 mode 0600). POST /definition, /hover {root, path, line (1-based), character (UTF-16), before?, after?};
 POST /contents {root, uri}: text of a file or jdt:// class a definition pointed at; POST /status; GET /health.
+POST /symbols {root, path}: the file's classes, functions and module-level names (what a function declares inside
+itself is left out), each with its lines; POST /references {root, path, line, character}: where the name at that
+position is used inside `root` (never a path outside it; those are only counted), each with its line's text.
 Language servers start per (root, language) on demand, over stdio, with the user's environment; they read the real
 files under `root`, so `root` must be a checkout at the reviewed revision. No command or path comes from the client:
 servers are a fixed table, and request paths must resolve inside `root`. Exits after IDLE seconds without requests,
@@ -28,6 +31,8 @@ LOG = os.path.join(DATA, "lsp-bridge.log")
 IDLE = float(os.environ.get("LSP_BRIDGE_IDLE", 20 * 60))
 OWNER_CHECK = float(os.environ.get("LSP_BRIDGE_OWNER_CHECK", 5))  # seconds between looks at the owner process
 TIMEOUT = float(os.environ.get("LSP_BRIDGE_TIMEOUT", 5))
+REF_TIMEOUT = float(os.environ.get("LSP_BRIDGE_REF_TIMEOUT", 20))  # /references searches the whole workspace; the others keep TIMEOUT
+MAX_SYMBOLS, MAX_REFS, MAX_FILE = 2000, 400, 2 << 20  # per answer; a file past MAX_FILE gives references without their text
 PATH_EXTRA = ["/opt/homebrew/bin", "/usr/local/bin", os.path.expanduser("~/.cargo/bin"), os.path.expanduser("~/go/bin")]
 
 # ext -> (server, LSP languageId)
@@ -72,6 +77,73 @@ def preview(text, line, before, after):
     lines = text.split("\n")
     lo = max(0, line - before)
     return lo + 1, lines[lo:line + after + 1]
+
+
+# LSP SymbolKind -> the word the mod shows; anything else is "other".
+KIND = {2: "module", 3: "namespace", 5: "class", 6: "method", 7: "property", 8: "field", 9: "constructor", 10: "enum", 11: "interface",
+        12: "function", 13: "variable", 14: "constant", 23: "struct"}
+CALLABLE = {"function", "method", "constructor"}
+# References under these folders are other people's code inside the checkout: counted as outside, never listed.
+VENDORED = {"node_modules", "site-packages", "vendor"}
+
+
+def span_end(lines, line, character):
+    """0-based line where the round bracket that opens right after the name at (line, character) closes: the end of
+    a call's arguments or of a declaration's parameters. No bracket after the name: `line`.
+    ponytail: quotes are followed on one line only, and a bracket still open after 40 lines ends there."""
+    if line >= len(lines):
+        return line
+    rest, i = lines[line], character
+    while i < len(rest) and (rest[i].isalnum() or rest[i] in "_$"):
+        i += 1
+    head = rest[i:]
+    lead = len(head) - len(head.lstrip())
+    if head[lead:lead + 1] == "=":  # const name = (a, b) => …
+        lead += 1 + len(head[lead + 1:]) - len(head[lead + 1:].lstrip())
+        if head[lead:lead + 5] == "async":
+            lead += 5 + len(head[lead + 5:]) - len(head[lead + 5:].lstrip())
+    if head[lead:lead + 1] != "(":
+        return line
+    depth, i = 0, i + lead
+    for k in range(line, min(len(lines), line + 40)):
+        quote = None
+        for c in lines[k][i:] if k == line else lines[k]:
+            if quote:
+                quote = None if c == quote else quote
+            elif c in "\"'`":
+                quote = c
+            elif c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+                if depth == 0:
+                    return k
+    return min(len(lines) - 1, line + 39)
+
+
+def flat_symbols(res, lines, container="", out=None):
+    """documentSymbol's answer (a tree, or the older flat list) as one list, outermost first:
+    {name, kind, container, line, end, nameLine, character, sigEnd}; lines 1-based, character UTF-16 in nameLine.
+    A function's own children (locals, nested functions) are left out: its lines belong to it."""
+    out = [] if out is None else out
+    for sym in res or []:
+        rng = sym.get("range") or (sym.get("location") or {}).get("range")
+        if not rng or not sym.get("name"):
+            continue
+        sel = sym.get("selectionRange")
+        start, end = rng["start"], rng["end"]
+        last = end["line"] - 1 if end.get("character") == 0 and end["line"] > start["line"] else end["line"]
+        if sel:
+            name_line, ch = sel["start"]["line"], sel["start"]["character"]
+        else:  # the flat form has no place for the name: the first line of the range that spells it
+            name_line = next((k for k in range(start["line"], min(last, len(lines) - 1) + 1) if sym["name"] in lines[k]), start["line"])
+            ch = max(0, lines[name_line].find(sym["name"])) if name_line < len(lines) else 0
+        kind = KIND.get(sym.get("kind"), "other")
+        out.append({"name": sym["name"], "kind": kind, "container": container or sym.get("containerName") or "", "line": start["line"] + 1, "end": last + 1,
+                    "nameLine": name_line + 1, "character": ch, "sigEnd": span_end(lines, name_line, ch) + 1})
+        if kind not in CALLABLE:
+            flat_symbols(sym.get("children"), lines, f"{container}.{sym['name']}" if container else sym["name"], out)
+    return out
 
 
 def hover_text(contents):
@@ -230,8 +302,11 @@ def walk(root, depth):
 
 
 def throwaway(root):
-    # ponytail: the pr-review agent's review worktree lives at <clone>/.worktrees/review; caches may go inside it.
-    return f"{os.sep}.worktrees{os.sep}" in root + os.sep
+    # ponytail: the review worktree (worktree.py) is the linked worktree <worktrees>/<repo>/pr-review, or, from
+    # earlier versions, <clone>/.worktrees/review; caches may go inside it. A person's own worktree of a branch
+    # named pr-review would count too: worktree.py refuses to use that one, so the review never runs there.
+    root = root.rstrip(os.sep)
+    return f"{os.sep}.worktrees{os.sep}" in root + os.sep or (os.path.basename(root) == "pr-review" and os.path.isfile(os.path.join(root, ".git")))
 
 
 class Server:
@@ -378,6 +453,7 @@ class Server:
                 "capabilities": {
                     "general": {"positionEncodings": ["utf-16"]},
                     "textDocument": {"definition": {"linkSupport": True}, "hover": {"contentFormat": ["markdown", "plaintext"]},
+                                     "documentSymbol": {"hierarchicalDocumentSymbolSupport": True}, "references": {},
                                      "synchronization": {"didSave": False}},
                     "workspace": {"configuration": True, "workspaceFolders": True},
                     "window": {"workDoneProgress": False},
@@ -524,6 +600,58 @@ class Bridge:
             text += "\n\n" + LIMITED_CPP
         return {"status": "ok" if text else "none", "markdown": text}
 
+    def symbols(self, req):
+        """The file's classes, functions and module-level names with their lines (flat_symbols). Same gate as hover:
+        the path must be a file inside root, the server is the one of its language, safe unless the root is trusted."""
+        root, full, s = self.target(req)
+        if not s:
+            return {"status": "unsupported", "message": f"No language server for .{ext_of(full)} files"}
+        busy = self.wait_ready(s)
+        if busy:
+            return busy
+        uri = s.sync(full)
+        res = s.request("textDocument/documentSymbol", {"textDocument": {"uri": uri}})
+        out = flat_symbols(res, s.opened[uri][1].split("\n"))
+        return {"status": "ok", "server": LABEL[s.lang], "symbols": out[:MAX_SYMBOLS], "more": max(0, len(out) - MAX_SYMBOLS)}
+
+    def references(self, req):
+        """Where the name at a position is used, the declaration itself aside. Only places inside root are listed
+        (as paths relative to it, with the line's text and the line where the call's brackets close); a use outside
+        root or in vendored code (VENDORED, dot folders) is counted in `outside`. At most MAX_REFS; `more`: the rest.
+        The search covers the workspace, so it gets REF_TIMEOUT instead of TIMEOUT."""
+        root, full, s = self.target(req)
+        if not s:
+            return {"status": "unsupported", "message": f"No language server for .{ext_of(full)} files"}
+        busy = self.wait_ready(s)
+        if busy:
+            return busy
+        uri = s.sync(full)
+        res = s.request("textDocument/references", {"textDocument": {"uri": uri}, "position": self.position(req), "context": {"includeDeclaration": False}},
+                        timeout=REF_TIMEOUT)
+        found, outside = {}, 0
+        for loc in res or []:
+            p, start = path_of(loc.get("uri") or ""), (loc.get("range") or {}).get("start") or {}
+            if not under(root, p):
+                outside += 1
+                continue
+            real = os.path.realpath(p)
+            rel = os.path.relpath(real, root)
+            if any(part in VENDORED or part.startswith(".") for part in rel.split(os.sep)[:-1]):
+                outside += 1
+                continue
+            found.setdefault((rel, start.get("line", 0)), (start.get("character", 0), real))
+        texts, out = {}, []
+        for (rel, line), (ch, real) in sorted(found.items())[:MAX_REFS]:
+            if real not in texts:
+                try:
+                    texts[real] = open(real, encoding="utf-8", errors="replace").read().split("\n") if os.path.getsize(real) <= MAX_FILE else []
+                except OSError:
+                    texts[real] = []
+            lines = texts[real]
+            out.append({"path": rel, "line": line + 1, "character": ch, "end": span_end(lines, line, ch) + 1,
+                        "text": lines[line].strip()[:200] if line < len(lines) else ""})
+        return {"status": "ok", "server": LABEL[s.lang], "references": out, "outside": outside, "more": max(0, len(found) - MAX_REFS)}
+
     def contents(self, req):
         root = os.path.realpath(req.get("root") or "")
         uri = req.get("uri") or ""
@@ -558,7 +686,7 @@ class Bridge:
 
 def make_handler(bridge, token, httpd_ref):
     routes = {"/definition": bridge.definition, "/hover": bridge.hover, "/contents": bridge.contents, "/status": bridge.status,
-              "/forget": bridge.forget}
+              "/forget": bridge.forget, "/symbols": bridge.symbols, "/references": bridge.references}
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *a):
@@ -733,7 +861,7 @@ def main(argv):
     if cmd == "call" and len(argv) == 4:
         if start_quiet() != 0:
             return 1
-        print(json.dumps(http(running(), "POST", argv[2], json.loads(argv[3]), timeout=TIMEOUT + 5)))
+        print(json.dumps(http(running(), "POST", argv[2], json.loads(argv[3]), timeout=(REF_TIMEOUT if argv[2] == "/references" else TIMEOUT) + 5)))
         return 0
     print(__doc__, file=sys.stderr)
     return 2

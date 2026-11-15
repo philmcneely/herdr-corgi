@@ -13,9 +13,13 @@ and never git itself. An allowlist, nothing else passes (exit 2 with the reason)
   a bare ..; a revision range like base..head is no segment and stays allowed), also after : (rev:path).
 git runs as `git --no-pager -C <checkout>`, with no external diff, no textconv, GIT_CEILING_DIRECTORIES above the
 checkout and abbreviated options disallowed. Standard library only.
+
+One command of its own, for the mod and not for git: `regular-file <path>` prints the path as the disk has it when it
+is one tracked regular file of the checkout, and nothing (exit 1) otherwise (regular_file).
 """
 import os
 import re
+import stat
 import subprocess
 import sys
 
@@ -112,17 +116,43 @@ def refused(cmd, args):
     return None
 
 
+def regular_file(root, rel, env):
+    """The file an editor may open for a PR that is not trusted (editor-view.js): root/rel as an absolute path, or None.
+    The index must have exactly this path as a regular file (mode 100…; a folder has other entries, a symlink is
+    120000, a submodule 160000), and the disk must agree: no symlink on the way to it and a regular file at its end,
+    so that its real path is, byte for byte, the checkout's real path and this name. The disk is asked because the
+    index alone is not what an editor opens: on a file system that ignores case or normalizes names (macOS), a PR's
+    `notes.md` (a file) and `NOTES.md` (a symlink) are one entry on disk, and it may be the symlink. root is real."""
+    if bad_path(rel) or any(ord(c) < 32 for c in rel):
+        return None
+    rel = os.path.normpath(rel)
+    r = subprocess.run(["git", "--no-pager", "--literal-pathspecs", "-C", root, "-c", "core.fsmonitor=false", "ls-files", "-s", "-z", "--", rel], env=env, capture_output=True)
+    rows = [x for x in r.stdout.split(b"\0") if x]
+    meta, _, name = rows[0].partition(b"\t") if r.returncode == 0 and len(rows) == 1 else (b"", b"", b"")
+    if not re.fullmatch(rb"100\d{3} [0-9a-f]+ 0", meta) or name != os.fsencode(rel):
+        return None
+    path = os.path.join(root, rel)
+    try:
+        return path if stat.S_ISREG(os.lstat(path).st_mode) and os.path.realpath(path) == path else None
+    except OSError:
+        return None
+
+
 def main(argv):
     if len(argv) < 2 or not os.path.isabs(argv[0]) or not os.path.isdir(argv[0]):
         print("usage: safegit.py <checkout> <command> [args…]", file=sys.stderr)
         return 2
     root, cmd, args = os.path.realpath(argv[0]), argv[1], argv[2:]
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}  # no GIT_DIR, GIT_EXTERNAL_DIFF, GIT_CONFIG_* from outside
+    env.update(GIT_CEILING_DIRECTORIES=os.path.dirname(root), GIT_TEST_DISALLOW_ABBREVIATED_OPTIONS="1", GIT_PAGER="cat", PAGER="cat", GIT_CONFIG_NOSYSTEM="1")
+    if cmd == "regular-file":
+        real = regular_file(root, args[0], env) if len(args) == 1 else None
+        sys.stdout.write(real or "")
+        return 0 if real else 1
     why = refused(cmd, args)
     if why:
         print(f"safegit: refused: {why}", file=sys.stderr)
         return 2
-    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}  # no GIT_DIR, GIT_EXTERNAL_DIFF, GIT_CONFIG_* from outside
-    env.update(GIT_CEILING_DIRECTORIES=os.path.dirname(root), GIT_TEST_DISALLOW_ABBREVIATED_OPTIONS="1", GIT_PAGER="cat", PAGER="cat", GIT_CONFIG_NOSYSTEM="1")
     plain = ["--no-ext-diff", "--no-textconv"] if cmd in ("diff", "log", "show") else []
     return subprocess.run(["git", "--no-pager", "-C", root, "-c", "core.fsmonitor=false", cmd, *plain, *args], env=env).returncode
 

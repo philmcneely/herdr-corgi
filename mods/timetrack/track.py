@@ -14,7 +14,8 @@ segment ends at its last qualifying sample (backdated). Only segments are stored
 month; a year workbook (.xlsx, written by hand with zipfile) mirrors them.
 
 The daemon keeps running when Herdr quits (app/idle sampling is independent of Herdr; it costs two
-tiny subprocesses per sample) and is (re)started by the chip via --facts. It re-execs
+tiny subprocesses per sample) and is (re)started by the chip via --facts. It stops once track.py itself is
+gone (its app home was deleted). It re-execs
 itself when this file changes. A kill loses nothing: the open segment is in state.json and gets
 closed, backdated, by the next run.
 
@@ -61,6 +62,7 @@ DEFAULTS = {
     "excel_every_minutes": 15,
     "keep_months": 24,
     "work_apps": [],
+    "window_title": False,
 }
 
 
@@ -237,6 +239,7 @@ def step(st, now, ok, ctx, proj, cfg, active=False):
     if not o:
         o = st["open"] = {"start": now, "last": now, "source": "auto", "ctx": {}, "proj": {}}
     o["last"] = now
+    o["now"] = proj  # what this sample counted: status()'s window title
     for k in ctx:
         o["ctx"][k] = o["ctx"].get(k, 0) + 1
     for k in proj:
@@ -717,6 +720,8 @@ def status(st, cfg, now):
         "note": r["note"] if r else "", "edited": r["edited"] if r else [],
         "segments": [[g["s"], g["e"], bool(g.get("open"))] for g in sorted(by_day(segs).get(today, []), key=lambda g: g["s"])],
         "context": close(o)["context"] if o else [],
+        # The project being tracked, for the Herdr window's title (setting window_title); null: Herdr's own title.
+        "title": (o.get("now") or [None])[0] if o and cfg.get("window_title") else None,
         "week": sum(x["net"] for d, x in rows.items() if mon <= d <= today), "target": cfg["week_target_hours"],
         "xlsx": xlsx_path(cfg, today.year), "xlsx_error": st.get("xlsx_error"),
         "xlsx_hold": os.path.exists(path("xlsx.hold")),
@@ -816,6 +821,9 @@ def daemon():
         except Exception:
             log("tick failed:\n" + traceback.format_exc())
         time.sleep(max(5, load_cfg()["sample_seconds"]))
+        if not os.path.exists(me):  # its app home was deleted (a copy for tests): nothing will run or read it again
+            log("track.py is gone, stopping")
+            return
         try:
             if os.path.getmtime(me) != born:
                 log("track.py changed, restarting")

@@ -1,9 +1,12 @@
 """Run: python3 test_worktree.py  (a throwaway git repo, no network)."""
+import os
 import pathlib
 import subprocess
 import tempfile
 
 import worktree
+
+os.environ.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")  # no hooks or templates of this machine, also for worktree.py's own git
 
 with tempfile.TemporaryDirectory() as d:
     git = lambda *a: subprocess.run(["git", *a], cwd=d, check=True, capture_output=True, text=True).stdout.strip()
@@ -58,4 +61,64 @@ with tempfile.TemporaryDirectory() as d:
     repo_at(base / "red" / "api", "https://github.com/other/api")  # taken by another repo: the owner-repo name
     repo_at(base / "red" / "acme-api", "https://github.com/acme/api.git")
     assert worktree.find_clone("acme", "api", base / "space") == base / "red" / "acme-api"  # dedicated beats local
+
+# The review worktree: in Herdr's folder for worktrees (<worktrees>/<repo>/pr-review), never inside the clone; reused
+# for the next head; a person's own checkout at that path is refused, not cleaned; one an earlier version made inside
+# the clone is used on and never removed.
+import contextlib  # noqa: E402
+import io  # noqa: E402
+import json  # noqa: E402
+import time  # noqa: E402
+with tempfile.TemporaryDirectory() as d:
+    base = pathlib.Path(d).resolve()
+    g = lambda *a, cwd: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()  # noqa: E731
+    origin = base / "github.com" / "acme" / "api.git"
+    origin.mkdir(parents=True); g("init", "-q", "-b", "main", cwd=origin)
+    (origin / "a.py").write_text("x = 1\n"); g("add", ".", cwd=origin); g("commit", "-qm", "base", cwd=origin)
+    def push(text):  # the PR's head moves
+        (origin / "a.py").write_text(text); g("commit", "-qam", "pr", cwd=origin); g("update-ref", "refs/pull/7/head", "HEAD", cwd=origin)
+        return g("rev-parse", "HEAD", cwd=origin)
+    def run():
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            worktree.main("https://github.com/acme/api/pull/7")
+        return json.loads(out.getvalue())
+    for name in ("api", "old"):  # two clones: a fresh one, and one with an earlier version's review worktree inside
+        g("clone", "-q", str(origin), str(base / ("code" if name == "api" else "code-old") / "api"), cwd=base)
+    clone, old = base / "code" / "api", base / "code-old" / "api"
+    worktree.WORKTREES = base / "wt"
+    worktree.BASES = [base / "code"]
+    h1 = push("x = 2\n")
+    r = run()
+    tree = base / "wt" / "api" / "pr-review"
+    assert r == {"path": str(tree), "head": h1, "clone": str(clone)}, r
+    assert (tree / ".git").is_file() and worktree.detached(tree) and (tree / "a.py").read_text() == "x = 2\n"
+    assert not (clone / ".worktrees").exists() and g("status", "--porcelain", cwd=clone) == "", "nothing is made inside the clone"
+    (tree / "left.txt").write_text("from the review before\n")
+    h2 = push("x = 3\n")
+    assert run() == {"path": str(tree), "head": h2, "clone": str(clone)} and (tree / "a.py").read_text() == "x = 3\n" and not (tree / "left.txt").exists()
+    # A person's own checkout of a branch at that path: refused, and nothing in it is touched.
+    g("worktree", "remove", "--force", str(tree), cwd=clone); g("worktree", "add", "-q", "-b", "pr-review", str(tree), cwd=clone)
+    (tree / "mine.txt").write_text("my work\n")
+    try:
+        run()
+        raise AssertionError("reset a checkout that is not the review's")
+    except RuntimeError as e:
+        assert "is not this review's checkout" in str(e), e
+    assert (tree / "mine.txt").read_text() == "my work\n"
+    # … nor is it removed for its age (only detached trees are), and an aged review tree of another repo is.
+    aged = time.time() - worktree.MAX_AGE - 60
+    g("worktree", "add", "-q", "--detach", str(base / "wt" / "other" / "pr-review"), cwd=old)
+    for t in (tree, base / "wt" / "other" / "pr-review"):
+        os.utime(t, (aged, aged))
+    worktree.prune(None)
+    assert tree.exists() and not (base / "wt" / "other" / "pr-review").exists()
+    # An earlier version's <clone>/.worktrees/review: used on, however old, and no second tree in the folder.
+    g("worktree", "add", "-q", "--detach", str(old / ".worktrees" / "review"), cwd=old)
+    os.utime(old / ".worktrees" / "review", (aged, aged))
+    worktree.BASES = [base / "code-old"]
+    r = run()
+    assert r["path"] == str(old / ".worktrees" / "review") and r["head"] == h2 and len(g("worktree", "list", cwd=old).splitlines()) == 2, r
+    worktree.prune(None)
+    assert (old / ".worktrees" / "review" / "a.py").read_text() == "x = 3\n"
 print("ok")

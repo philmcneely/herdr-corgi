@@ -241,6 +241,37 @@ assert ans["unlinked"] == [], "every broken or partly requirement here has a fin
 assert f3["severity"] == "low" and f3["criteria"] == ["c3"] and c3["findings"] == [f3["id"]], "an extra change does not raise the severity"
 assert f4["criteria"] == [] and f4["severity"] == "medium" and "breaks" not in f4, "unknown requirement and node dropped"
 assert f2["breaks"] == {"from": "reminders", "to": "mailer", "edge": "e1"} and f3["breaks"] == {"node": "status"}
+# A finding at a state machine names the move it is about (breaks.transition), checked against the state diagrams:
+# next to its place on the map, by id or label in any case, one end alone, also written as a plain from and to; a
+# move no diagram draws is dropped, and a call on the map is never read as a move.
+loan = {"kind": "state_machine", "title": "Loan", "nodes": [{"id": "borrowed", "label": "BORROWED"}, {"id": "overdue", "label": "OVERDUE"}, {"id": "returned", "label": "RETURNED"}],
+        "edges": [], "transitions": [{"from": "borrowed", "to": "overdue"}, {"from": "borrowed", "to": "returned"}, {"from": "overdue", "to": "returned"}]}
+sm = {"architecture": {"nodes": [{"id": "status"}, {"id": "reminders"}, {"id": "borrowed"}, {"id": "overdue"}], "edges": [{"from": "reminders", "to": "status"}, {"from": "borrowed", "to": "overdue"}]},
+      "steps": [{"visuals": [loan], "findings": [
+          {"breaks": {"from": "reminders", "to": "status", "transition": {"from": "borrowed", "to": "overdue"}}},
+          {"breaks": {"node": "status", "transition": {"from": "Borrowed", "to": "RETURNED"}}},
+          {"breaks": {"transition": {"to": "returned"}}},
+          {"breaks": {"from": "OVERDUE", "to": "returned"}},
+          {"breaks": {"node": "status", "transition": {"from": "returned", "to": "borrowed"}}},
+          {"breaks": {"transition": {"from": "lost"}}},
+          {"breaks": {"from": "borrowed", "to": "overdue"}},
+          {"breaks": {"transition": "borrowed"}}]}]}
+review.place(sm)
+assert [f.get("breaks") for f in sm["steps"][0]["findings"]] == [
+    {"from": "reminders", "to": "status", "edge": "e0", "transition": {"from": "borrowed", "to": "overdue"}},
+    {"node": "status", "transition": {"from": "borrowed", "to": "returned"}},
+    {"transition": {"to": "returned"}},
+    {"transition": {"from": "overdue", "to": "returned"}},
+    {"node": "status"},
+    None,
+    {"from": "borrowed", "to": "overdue", "edge": "e1"},
+    None], "the move a finding names, as the state diagram draws it"
+review.place(sm)
+assert sm["steps"][0]["findings"][0]["breaks"]["transition"] == {"from": "borrowed", "to": "overdue"}, "placing again (a diagram refresh) keeps a move the diagram still has"
+sm["steps"][0]["visuals"] = []
+review.place(sm)
+assert [f.get("breaks") for f in sm["steps"][0]["findings"]][:3] == [{"from": "reminders", "to": "status", "edge": "e0"}, {"node": "status"}, None], "without the diagram the move goes, the place on the map stays"
+assert "State ids of the state diagram \"Loan\" (for breaks.transition): borrowed, overdue, returned" in review.previous_digest({"answer": {"steps": [{"title": "s", "visuals": [loan]}]}})
 rp = {"architecture": {"groups": [{"id": "g_fd"}], "nodes": [{"id": "h", "runs_in": "g_fd"}, {"id": "c", "runs_in": "h"}, {"id": "x", "runs_in": "nowhere"}, {"id": "s", "runs_in": "s"}],
                        "edges": [{"from": "h", "to": "c", "in_process": True}, {"from": "c", "to": "x", "in_process": "yes"}]}, "steps": []}
 review.place(rp)
@@ -287,7 +318,7 @@ assert old["steps"][0]["findings"][0]["severity"] == "medium" and old["steps"][0
 
 # The prompt asks for all of it; a state diagram is not optional where the diff touches a state machine (also on a diagram refresh).
 p = review.prompt([], [], "PR: x", True)
-for part in ("state (met:", "not_done", "acceptance (true", "criteria (the ids", "is named by at least one finding", "breaks (where it breaks", "question_files", "category (as for findings)",
+for part in ("state (met:", "not_done", "acceptance (true", "criteria (the ids", "is named by at least one finding", "breaks (where it breaks", "transition for every finding about a state machine", "names that move of the diagram in its breaks as transition {from, to}", "question_files", "category (as for findings)",
              "breaks_requirement (breaks an acceptance criterion", "certainty (confirmed", "preconditions (what must hold", "test: changed behavior",
              "titled \"Tests\"", "one finding per defect", "with impact untested", "components: the inventory", "checked: your own report"):
     assert part in p, part

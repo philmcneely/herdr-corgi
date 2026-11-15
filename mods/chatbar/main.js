@@ -2,7 +2,8 @@
 // Answer from any layout: numbered choices as buttons (hc keys), a reply field (hc send),
 // the live terminal in a window, or go to its pane. Floats bottom-right through the layouts'
 // "floating" lists; renders nothing (so the float hides) when nobody waits.
-// Screens are read (hc read, ~0.4 s) only for open blocked boxes, once per status change or open.
+// Screens are read (hc read, ~0.4 s) only for open blocked boxes: on a status change or open, then again every 5 s
+// and after an answer from here, because an agent stays blocked while a prompt with several questions moves on.
 // Claude Code agents shown here get task-list progress and "now doing" (progress.py, every 5 s at most),
 // unless a provider already publishes them. Working agents with a task list wait as small ringed heads.
 // Other mods plug in through shared state only (PROVIDERS.md): chatbar.request, chatbar.agents.<provider>,
@@ -10,9 +11,9 @@
 
 import { View, div, image, svg, PathBuilder } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { agents, spaces, panes, terminals, focused, shared, setShared, theme, run, hc, exec, appHome, openOverlay, notify, settings, nextCommand } from "herdr";
-import { parseScreen } from "./screen.js";
-import { API_VERSION, mergeProviders, infoFor, goTo, readRequest, gotoItems, progressLine } from "./plugins.js";
+import { agents, spaces, panes, terminals, focused, shared, setShared, theme, run, hc, exec, appHome, openOverlay, notify, settings, nextCommand, checking } from "herdr";
+import { parseScreen, nextScreen } from "./screen.js";
+import { API_VERSION, mergeProviders, infoFor, goTo, readRequest, gotoItems, progressLine, publishDelay } from "./plugins.js";
 
 const MAX_OPEN = 3, MAX_BUSY = 4, W = 360, LINE = 18;
 const MOTION = { duration: 180, easing: "ease-out" };
@@ -75,9 +76,13 @@ export default class Chatbar extends View {
       s.on("submit", (_e, cx) => this.reply(i, cx));
       return s;
     });
+    // `herdr-app check` runs init and the first render for real: there the bar starts no timer, reads no screen
+    // (hc) and starts no progress.py.
+    this.dry = checking();
+    if (this.dry) return;
     // Data only: the "waiting 5m" labels, and progress for the agents shown (poll skips when there are none).
     cx.timer.every(30000, (cx) => cx.notify());
-    cx.timer.every(5000, (cx) => this.poll(cx));
+    cx.timer.every(5000, (cx) => { this.poll(cx); for (const x of this.live ?? []) this.reread(x, cx); });
     // keys.json "chatbar.mic": dictate into the front bubble (chatbar.mic:<address>: into that agent's).
     cx.spawn(async (cx) => {
       for (;;) {
@@ -97,7 +102,7 @@ export default class Chatbar extends View {
 
   // Task-list progress and "now doing" for this.want ({address, pid, cwd, session}), outside render.
   poll(cx) {
-    if (!this.want?.length || this.polling) return;
+    if (this.dry || !this.want?.length || this.polling) return;
     this.polling = true;
     const want = this.want;
     cx.spawn(async (cx) => {
@@ -122,6 +127,7 @@ export default class Chatbar extends View {
   }
 
   read(address, cx, retry = false) {
+    if (this.dry) return;
     const id = ++this.reads;
     this.screens[address] = { loading: id, lines: [], options: [] };
     cx.spawn(async (cx) => {
@@ -143,6 +149,25 @@ export default class Chatbar extends View {
     });
   }
 
+  // The screen of an open blocked box, read again without the "Reading the screen…" note: the box changes only when
+  // the screen did (screen.js nextScreen).
+  reread(address, cx) {
+    const cached = this.screens[address];
+    if (!cached || cached.loading || cached.rereading) return;
+    cached.rereading = true;
+    cx.spawn(async (cx) => {
+      let read;
+      try {
+        const r = await hc(["read", address, "--json"]);
+        read = r.code === 0 ? parseScreen(JSON.parse(r.stdout).text ?? "") : { lines: [], options: [], error: true };
+      } catch { read = { lines: [], options: [], error: true }; }
+      if (this.screens[address] !== cached) return; // the status moved on, or the box was opened again, meanwhile
+      cached.rereading = false;
+      const next = nextScreen(cached, read);
+      if (next !== cached) { this.screens[address] = next; cx.notify(); }
+    });
+  }
+
   // Always by address: the box's own agent, never the focused terminal.
   send(address, args, what, cx) {
     if (this.screens[address]) this.screens[address].sent = what;
@@ -153,7 +178,7 @@ export default class Chatbar extends View {
       if (r.code !== 0) {
         notify({ title: `Couldn't send to ${address}`, body: (r.stderr || r.stdout).trim().slice(0, 200), level: "error" });
         if (this.screens[address]) this.screens[address].sent = null;
-      }
+      } else cx.timer.after(700, (cx) => this.reread(address, cx)); // what the answer led to: the next question, if any
       cx.notify();
     });
   }
@@ -214,7 +239,15 @@ export default class Chatbar extends View {
     const json = JSON.stringify(items);
     if (json === this.lastItems) return;
     this.lastItems = json;
-    cx.timer.after(0, () => { if (json !== JSON.stringify(shared("goto.items.chatbar"))) setShared("goto.items.chatbar", items); });
+    this.gotoList = items;
+    if (this.publishing) return; // the scheduled write takes the newest list
+    this.publishing = true;
+    // Outside render, and held back while the list keeps changing (publishDelay): a write re-renders every mod.
+    cx.timer.after(publishDelay(this.publishedAt, Date.now()), () => {
+      this.publishing = false;
+      this.publishedAt = Date.now();
+      if (JSON.stringify(this.gotoList) !== JSON.stringify(shared("goto.items.chatbar"))) setShared("goto.items.chatbar", this.gotoList);
+    });
   }
 
   openTerminal(address) {
@@ -306,9 +339,8 @@ export default class Chatbar extends View {
     }
     for (const x of this.grown) if (!openSet.has(x)) this.grown.delete(x);
 
-    for (const a of open) {
-      if (a.status === "blocked" && !this.min.has(a.address) && !this.screens[a.address]) this.read(a.address, cx);
-    }
+    this.live = open.filter((a) => a.status === "blocked" && !this.min.has(a.address)).map((a) => a.address); // the screens to keep current
+    for (const x of this.live) if (!this.screens[x]) this.read(x, cx);
     // New boxes mount folded and grow one flip later; GPUI animates the height natively.
     // ponytail: a one-shot flip, not an animation timer.
     if (open.some((a) => !this.grown.has(a.address)) && !this.flipping) {
@@ -379,7 +411,7 @@ export default class Chatbar extends View {
         .child(p.total > 0
           ? div().id(`ring-${addr}`).flex_none().tooltip(progressLine(p)).child(ring(14, p.done / p.total, t.background + "55", t.background, 2.5))
           : div().id(`dot-${addr}`).size(9).flex_none().rounded_full().tooltip(`Agent status: ${a.status}.`).accessibility_label(`Agent status: ${a.status}`).border_1().border_color(t.background).bg(t[a.status] ?? t.done))
-        .child(icon(a.program, 16, t.background))
+        .children([icon(a.program, 16, t.background)].filter(Boolean)) // a program without an icon: child(null) throws
         .child(v_flex().flex_1().min_w(0)
           .child(div().truncate().text_size(13.5).font_semibold().child(acc.title))
           .child(div().truncate().text_size(12.5).opacity(0.85)
@@ -436,7 +468,7 @@ export default class Chatbar extends View {
         // A press here must not reach the float: unstopped, it drags the box and the field never gets the cursor.
         .child(div().id(`reply-${addr}`).flex_1().min_w(0).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Input.new(this.inputs[slot]).h(34).px(10).rounded(17)
           .border_1().border_color(t.input).bg(t.background).text_size(13).text_color(t.foreground)))
-        .child(this.mic(t, addr)))
+        .children([this.mic(t, addr)].filter(Boolean))) // no mic without the dictate mod: child(null) throws
       .child(h_flex().h(36).px(8).gap(6).items_center().justify_end()
         .child(this.action(t, `term-${addr}`, "Open terminal", () => this.openTerminal(addr), "Open this agent's terminal."))
         .child(this.action(t, `go-${addr}`, "Go to", () => {

@@ -6,6 +6,7 @@ import { div } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar } from "gpui-base";
 import { exec, run, shared, setShared, appHome, readTextFile } from "herdr";
 import { checkScript, parseCheck, report, blockers, found, pretypeArgv } from "./setup.js";
+import { TYPE } from "./views.js"; // the text sizes (U34)
 
 export const SETUP_KEY = "pr-review.setup";
 const MARK = { ok: ["✓", "ansi2"], missing: ["missing", "ansi1"], "optional-missing": ["not installed", "muted"], "logged-out": ["logged out", "ansi3"] };
@@ -50,7 +51,7 @@ export function setupBanner(view, t) {
   const r = rows(), b = r ? blockers(r) : [];
   if (view.setupFirst && b.length && view.view !== "setup") { view.view = "setup"; view.setupFirst = false; }
   if (!b.length || view.view === "setup") return null;
-  return h_flex().flex_none().px(14).py(6).gap(8).items_center().bg(t.ansi1 + "1c").border_b(1).border_color(t.border).text_size(12)
+  return h_flex().flex_none().px(14).py(6).gap(8).items_center().bg(t.ansi1 + "1c").border_b(1).border_color(t.border).text_size(TYPE.small)
     .child(div().flex_1().min_w(0).whitespace_normal().child(`Needs ${b.map((x) => `${x.id}${x.status === "logged-out" ? " (logged out)" : ""}`).join(", ")} to work.`))
     .child(div().id("pr-setup-banner").tooltip("Show which programs are missing and how to install them").px(8).py(1).rounded(5).border_1().border_color(t.border).cursor_pointer().hover((s) => s.bg(t.hover))
       .on_click((_e, cx) => { view.view = "setup"; cx.notify(); }).child("Open Setup"));
@@ -62,30 +63,42 @@ function install(view, row, cx) {
   cx.notify();
 }
 
+// The first line of Setup: what the list below comes to. rows: [{id, status}], at: when it was checked (ms).
+export function setupSummary(rows, at, now = Date.now()) {
+  const off = rows.filter((x) => x.status === "missing" || x.status === "logged-out"), extra = rows.filter((x) => x.status === "optional-missing").length;
+  const min = Math.max(0, Math.round((now - at) / 60000));
+  const found = off.length ? `${off.length} of ${rows.length} programs ${off.length === 1 ? "is" : "are"} missing or not signed in: ${off.map((x) => x.id).join(", ")}. Install opens a terminal with the command typed in, not run.`
+    : extra ? `Everything required was found; ${extra} optional ${extra === 1 ? "program is" : "programs are"} not installed.` : `All ${rows.length} programs were found.`;
+  return `${found} Checked ${min < 1 ? "just now" : min < 60 ? `${min} min ago` : `${Math.round(min / 60)} h ago`}.`;
+}
+
 export function renderSetup(view, t) {
-  const s = shared(SETUP_KEY), r = rows();
-  const btn = (id, label, click, strong = false, tip = "") => div().id(id).tooltip(tip).flex_none().px(8).h(22).flex().items_center().rounded(5).border_1()
-    .border_color(strong ? t.accent : t.border).text_size(11).text_color(strong ? t.foreground : t.muted).cursor_pointer()
+  const s = shared(SETUP_KEY), r = rows(), blocked = (r ?? []).some((x) => x.status === "missing" || x.status === "logged-out");
+  const btn = (id, label, click, strong = false, tip = "") => div().id(id).tooltip(tip).flex_none().px(8).h(24).flex().items_center().rounded(5).border_1()
+    .border_color(strong ? t.accent : t.border).text_size(TYPE.small).text_color(strong ? t.foreground : t.muted).cursor_pointer()
     .hover((st) => st.text_color(t.foreground)).on_click(click).child(label);
   const line = (x) => v_flex().flex_none().px(8).py(5).gap(2).rounded(6).hover((st) => st.bg(t.hover))
     .child(h_flex().gap(8).items_center()
-      .child(div().id(`setup-st-${x.id}`).tooltip("Whether this program was found on this machine").flex_none().w(84).text_size(11).text_color(t[MARK[x.status][1]]).child(MARK[x.status][0]))
-      .child(div().flex_1().min_w(0).truncate().font_semibold().text_size(12).child(x.id))
+      .child(div().id(`setup-st-${x.id}`).tooltip("Whether this program was found on this machine").flex_none().w(84).text_size(TYPE.small).text_color(t[MARK[x.status][1]]).child(MARK[x.status][0]))
+      .child(div().flex_1().min_w(0).truncate().font_semibold().text_size(TYPE.small).child(x.id))
       .when(Boolean(x.install), (e) => e
         .child(btn(`setup-copy-${x.id}`, "Copy", (_e, cx) => { copyText(x.install); view.note = `Copied: ${x.install}`; cx.notify(); }, false, "Copy the install command to the clipboard"))
         .child(btn(`setup-run-${x.id}`, x.status === "logged-out" ? "Log in in terminal" : "Install in terminal", (_e, cx) => install(view, x, cx), x.need === "required", "Open a terminal with the command typed in, not run: press Enter there"))))
-    .child(div().pl(92).text_size(11).text_color(t.muted).whitespace_normal().child(x.what))
-    .when(Boolean(x.install), (e) => e.child(div().pl(92).text_size(11).text_color(t.dim).font_family("JetBrains Mono").child(x.install)))
-    .when(!x.install && x.status !== "ok", (e) => e.child(div().pl(92).text_size(11).text_color(t.dim).child("See the project's install page for this OS.")));
+    .child(div().pl(92).text_size(TYPE.small).text_color(t.muted).whitespace_normal().child(x.what))
+    .when(Boolean(x.install), (e) => e.child(div().pl(92).text_size(TYPE.small).text_color(t.dim).font_family("JetBrains Mono").child(x.install)))
+    .when(!x.install && x.status !== "ok", (e) => e.child(div().pl(92).text_size(TYPE.small).text_color(t.dim).child("See the project's install page for this OS.")));
   return div().flex_1().min_h(0).relative()
     .child(v_flex().id("pr-setup").absolute().inset_0().overflow_y_scroll().p(10).gap(8)
       .child(h_flex().flex_none().gap(8).items_center()
-        .child(div().flex_1().min_w(0).text_size(12).text_color(t.muted).whitespace_normal()
-          .child(view.setupBusy ? "Checking…" : s ? `Checked ${new Date(s.at).toLocaleTimeString()}. A mod can't install programs; Install opens a terminal with the command typed in, not run.` : "Not checked yet."))
+        .child(div().flex_1().min_w(0).text_size(TYPE.small).text_color(t.muted).whitespace_normal()
+          .child(view.setupBusy ? "Checking…" : s ? setupSummary(r ?? [], s.at) : "Not checked yet."))
         .child(btn("setup-check", view.setupBusy ? "…" : "Check again", (_e, cx) => runSetup(view, cx, true), false, "Look for the programs again"))
         .child(btn("setup-close", "Close", (_e, cx) => { view.view = "diff"; cx.notify(); }, false, "Leave Setup and go back")))
-      .children(r ? GROUPS.map(([need, title]) => v_flex().flex_none().gap(2)
-        .child(div().px(8).pt(4).text_size(11).font_semibold().text_color(t.muted).child(title.toUpperCase()))
+      // Everything found: the list is folded behind one row; something missing or logged out: it is open.
+      .when(Boolean(r) && !blocked, (e) => e.child(div().id("setup-fold").flex_none().px(8).h(24).flex().items_center().rounded(6).cursor_pointer().text_size(TYPE.small).text_color(t.muted).hover((st) => st.bg(t.hover).text_color(t.foreground))
+        .tooltip(view.setupOpen ? "Hide the list of programs" : "Show each program and what it is for").on_click((_e, cx) => { view.setupOpen = !view.setupOpen; cx.notify(); }).child(`${view.setupOpen ? "▾" : "▸"} The ${r.length} programs`)))
+      .children(r && (blocked || view.setupOpen) ? GROUPS.map(([need, title]) => v_flex().flex_none().gap(2)
+        .child(div().px(8).pt(4).text_size(TYPE.small).font_semibold().text_color(t.muted).child(title))
         .children(r.filter((x) => x.need === need).map(line))) : []))
     .child(Scrollbar.vertical("pr-setup").absolute().inset_0());
 }

@@ -77,7 +77,7 @@ assert [f["introduced_here"] for f in base] == [False, True], "the old mailer li
 unknown = [{"id": "u1", "ref": "r_f1", "file": "a.py", "line": 3}]
 resilience.view({}, unknown, {}, [], None)
 assert unknown[0]["introduced_here"] is None, "without the diff: old or new unclear"
-assert resilience.view({}, [], {}, []) == {"deps": [], "effects": [], "state": [], "races": [], "additions": [], "db_calls": [], "caches": [], "clocks": [], "blind_spots": [], "paths": [],
+assert resilience.view({}, [], {}, []) == {"deps": [], "effects": [], "state": [], "races": [], "additions": [], "downstream": [], "db_calls": [], "caches": [], "clocks": [], "blind_spots": [], "paths": [],
                                            "checks": [], "probes": [], "not_checked": []}
 
 # The block lands in the findings file next to the security view; another run keeps it.
@@ -152,5 +152,42 @@ for part in ("every public route's request, always", "answers 202 while the mail
              "measured by its purpose, not by a bug in it"):
     assert part in pr2, part
 for part in ("possible_today (false when the path cannot happen until", "raises (true when the failure ends in an exception", "never result)", "never cannot_happen because of a bug in the part", "for a queue trigger the consumer", "only when a protection stands behind it", "not possible today, see p4", "seen_as (one sentence", "oncall (one sentence", "next (one sentence with a verb"):
+    assert part in resilience.ASK, part
+# Seconds for the timing picture (timeline.js): the pauses as a list of numbers and one attempt's own timeout; a word,
+# a negative or a guess-shaped value is left out (not stated), never turned into 0.
+_secs = lambda retry: resilience.view({"deps": [{"at": "x.py:1", "mode": "sync", "node": "handler", "retry": {"attempts": 3, **retry}}]}, [], pic, [])["deps"][0]["retry"]  # noqa: E731
+assert (_secs({"backoff_s": [1, 2, 4], "attempt_s": 0.5})["backoff_s"], _secs({"backoff_s": [1, 2, 4], "attempt_s": 0.5})["attempt_s"]) == ([1, 2, 4], 0.5)
+assert all("backoff_s" not in _secs({"backoff_s": bad}) for bad in ("1, 2, 4", [1, "2"], [1, -2], None, [True])) and _secs({"backoff_s": []})["backoff_s"] == []
+assert all("attempt_s" not in _secs({"attempt_s": bad}) for bad in (0, -1, "3", None, True))
+assert {"attempt_s", "backoff_s"} <= set(sch["properties"]["deps"]["items"]["properties"]["retry"]["properties"])
+assert "backoff_s (the pauses in seconds in their order" in resilience.ASK and "never a guess" in resilience.ASK
+# Dependencies that fail or are overloaded: per dependency a case for each way it fails, once, in the order slow,
+# overloaded, down, bad answer, recovers. A decided case names its line (else it is not checkable); its path is one of
+# this run's, by the id the path got here; unknown nodes, edges, kinds and findings go; no dependency without a case.
+dn = resilience.view({"paths": [{"id": "px", "kind": "request", "steps": ["handler"], "result": "not_assessed"}, {"id": "p9", "kind": "request", "steps": ["handler"], "result": "finding", "findings": ["a1"]}],
+                      "downstream": [
+    {"dep": "Mailer", "kind": "external", "node": "mailer", "edge": "e1", "at": "./library/mailer.py:14", "mode": "sync", "entry": "POST /remind", "cases": [
+        {"when": "down", "at": "library/mailer.py:19", "handled": "no", "how": "3 tries, then drops the mail", "effect": "The mail is lost.", "path": "p9", "findings": ["zz"]},
+        {"when": "slow", "at": "library/mailer.py:16", "handled": "no", "how": "waits up to 7 s of the 10 s request", "path": "p1"},
+        {"when": "bad_answer", "at": "library/mailer.py:16", "handled": "partly", "how": "checks None only", "path": "px", "findings": ["a1"]},
+        {"when": "slow", "at": "x.py:1", "handled": "yes", "how": "a second word"},
+        {"when": "overloaded", "handled": "yes", "how": "backs off"},
+        {"when": "recovers", "at": "library/mailer.py:14", "handled": "maybe", "how": ""},
+        {"when": "on fire", "handled": "no"}, "junk"]},
+    {"dep": "Token store", "kind": "vault", "node": "ghost", "edge": "e9", "at": "h.py:9", "mode": "telepathy", "cases": [{"when": "bad_answer", "at": "h.py:9", "handled": "yes", "how": "checks None"}]},
+    {"dep": "No cases", "kind": "cache", "at": "c.py:1", "mode": "sync", "cases": []},
+    {"dep": "LoanStore (in-memory)", "kind": "internal", "node": "handler", "at": "library/consumer.py:19", "mode": "in_process", "cases": [{"when": "down", "at": "library/consumer.py:19", "handled": "yes", "how": "a dict"}]}, {"kind": "queue", "cases": [{"when": "down", "handled": "no", "at": "q.py:1"}]}]}, [], pic, ["a1"])["downstream"]
+assert [(d["dep"], d["kind"], d["node"], d["edge"], d["at"], d["mode"]) for d in dn] == [("Mailer", "external", "mailer", "e1", "library/mailer.py:14", "sync"), ("Token store", "other", None, None, "h.py:9", None)]
+assert [(c["when"], c["handled"], c["at"], c["path"]) for c in dn[0]["cases"]] == [("slow", "not_checkable", "library/mailer.py:16", None), ("overloaded", "not_checkable", None, None),
+                                                                                  ("down", "no", "library/mailer.py:19", "p2"), ("bad_answer", "partly", "library/mailer.py:16", "p1"),
+                                                                                  ("recovers", "not_checkable", "library/mailer.py:14", None)], dn[0]["cases"]
+# slow: no finding and no path shows it; down: its path's finding does; bad answer: its own finding does
+assert (dn[0]["entry"], dn[1]["entry"]) == ("POST /remind", "") and dn[0]["cases"][2]["findings"] == [] and dn[0]["cases"][2]["effect"] == "The mail is lost." and dn[1]["cases"][0]["handled"] == "yes"
+assert "downstream" in sch["required"] and "node" in sch["properties"]["downstream"]["items"]["required"] and sch["properties"]["downstream"]["items"]["properties"]["cases"]["items"]["properties"]["when"]["enum"] == resilience.WHENS
+assert "downstream" in resilience.PROBE_KINDS and "dependencies" in resilience.AREAS and {"no_backoff", "thundering_herd", "unchecked_answer", "backpressure"} <= set(resilience.FAILING)
+for part in ("State the same process holds", "dependencies that fail or are overloaded", "who waits how long at which line", "retries at once, retries on several layers", "A circuit breaker is no default answer",
+             "whether the system gets back by itself", "what only a measurement can tell", "separately for each way in that reaches it"):
+    assert part in pr2, part
+for part in ("downstream (one per dependency the PR starts to use or uses differently", "cases (one for each of slow, overloaded, down, bad_answer, recovers", "kind downstream: a stub plays the dependency"):
     assert part in resilience.ASK, part
 print("ok")

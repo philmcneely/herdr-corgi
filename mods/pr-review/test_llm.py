@@ -46,7 +46,7 @@ try:
         llm.log("Codex review", "blue", "codex", 0, 100, tool="codex")  # non-Claude tools log the same way
         assert len(next(ledger.glob("usage-*.jsonl")).read_text().splitlines()) == 2
 
-        # No context: the env is inherited untouched, the ledger says "default".
+        # No context: the account's own login is inherited, the ledger says "default".
         llm.claude("Feature C", "p")
         assert calls[-1][1]["env"].get("CLAUDE_CONFIG_DIR") == __import__("os").environ.get("CLAUDE_CONFIG_DIR")
         assert json.loads(next(ledger.glob("usage-*.jsonl")).read_text().splitlines()[-1])["account"] == "default"
@@ -127,4 +127,81 @@ finally:
 # Code is read and judged by at least sonnet: an old caller's haiku is lifted, the rest passes through.
 assert [llm.code_model(m) for m in ["haiku", "claude-haiku-4-5-20251001", None, "", "sonnet", "opus", "claude-fable-5-1"]] == \
     ["sonnet", "sonnet", "sonnet", "sonnet", "sonnet", "opus", "claude-fable-5-1"]
+# ---- a run that gave no answer: one sentence for the person, never the CLI's result object (llm.failure)
+ZERO = {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
+
+
+def result(**k):
+    """The result object `claude -p` prints for a run that ended at once: no tokens, no cost, is_error."""
+    return {"type": "result", "subtype": "success", "is_error": True, "duration_ms": 14, "duration_api_ms": 0, "num_turns": 1, "stop_reason": "stop_sequence",
+            "session_id": "00000000-0000-0000-0000-000000000000", "total_cost_usd": 0, "usage": ZERO, **k}
+
+
+def run_fails(code, stdout="", stderr=""):
+    """llm.claude with the CLI standing in: what it raises."""
+    subprocess.run = lambda args, **kw: subprocess.CompletedProcess(args, code, stdout, stderr)
+    try:
+        llm.claude("Explore: walkthrough", "prompt", model="opus", schema={"type": "object"})
+    except llm.RunFailed as e:
+        return e
+    finally:
+        subprocess.run = real
+    raise AssertionError("a failed run gave an answer")
+
+
+def sentence(e, kind, *parts):
+    text = str(e)
+    assert e.kind == kind, (e.kind, text)
+    assert text.startswith("Explore: walkthrough: The run"), text
+    assert all(p in text for p in parts), (parts, text)
+    assert not any(raw in text for raw in ('"usage"', "session_id", "duration_api_ms", "stop_reason", "{")), f"the result object is in the sentence: {text}"
+    assert len(text) <= 400 and text.rstrip().endswith("."), text
+
+
+# The usage limit, as the owner met it: no token, no cost, the reason only in `result`. The object itself is the detail.
+limit = result(result="Claude AI usage limit reached|1794751200")
+e = run_fails(1, json.dumps(limit))
+sentence(e, "limit", "ended at once without an answer", "Claude AI usage limit reached", "It resets at", "Choose another model or try again later.")
+assert json.loads(e.detail) == limit and "1794751200" not in str(e)
+sentence(run_fails(1, json.dumps(result(result="You've hit your limit · resets 3pm (Europe/Berlin)"))), "limit", "You've hit your limit · resets 3pm", "Choose another model")
+sentence(run_fails(1, json.dumps(result(result="Credit balance is too low"))), "limit", "Credit balance is too low")
+# Not signed in; a model the account does not have (the CLI's sentence, and an API error with its JSON inside).
+sentence(run_fails(1, json.dumps(result(result="Invalid API key · Please run /login"))), "login", "not signed in", "Run `claude` in a terminal, sign in")
+sentence(run_fails(1, json.dumps(result(result="There's an issue with the selected model (claude-opus-9). It may not exist or you may not have access to it."))), "model", "the model opus is not available here", "Choose another model.")
+api = llm.failure("Explore: walkthrough", 1, "", "", result(result='API Error: 404 {"type":"error","error":{"type":"not_found_error","message":"model: claude-opus-9"}}'), model="opus")
+sentence(api, "model", "API Error: 404: model: claude-opus-9")
+# Stopped by a signal, by the cost cap, out of turns, out of time.
+sentence(run_fails(-15), "stopped", "was stopped before it answered", "Try again.")
+sentence(run_fails(0, json.dumps(result(subtype="error_max_budget_usd", result="", usage={**ZERO, "input_tokens": 900}))), "budget", "stopped at its cost cap")
+sentence(run_fails(0, json.dumps(result(subtype="error_max_turns", result=""))), "turns", "used all its turns")
+
+
+def too_long(args, **kw):
+    raise subprocess.TimeoutExpired(args, kw["timeout"])
+
+
+subprocess.run = too_long
+try:
+    llm.claude("Explore: walkthrough", "prompt", timeout=180)
+    raise AssertionError("a run that timed out gave an answer")
+except llm.RunFailed as e:
+    sentence(e, "timeout", "took longer than 180 s", "choose a faster model")
+    timed = e
+finally:
+    subprocess.run = real
+# Nothing printed; something that is no JSON; a reason on stderr only; a result object without a word.
+sentence(run_fails(1), "empty", "ended without any output (exit code 1)")
+broken = run_fails(1, '<html><body>502 Bad Gateway</body></html>')
+assert broken.kind == "unreadable" and "could not be read" in str(broken) and "502 Bad Gateway" in str(broken) and broken.detail.startswith("<html>")
+cut = run_fails(1, json.dumps(limit)[:60])  # a result cut off in the middle
+assert cut.kind == "unreadable" and "could not be read" in str(cut) and len(str(cut)) < 200, str(cut)
+sentence(run_fails(2, "", "error: unknown option '--foo'\n"), "other", "error: unknown option '--foo'", "Choose another model or try again.")
+sentence(run_fails(1, json.dumps(result(result=""))), "other", "gave no reason (exit code 1)")
+# A run that had read something before it failed did not "end at once".
+late = run_fails(1, json.dumps(result(result="Overloaded", usage={**ZERO, "input_tokens": 1200})))
+assert "The run failed: Overloaded." in str(late), str(late)
+# What a status file keeps: the sentence, the kind and the CLI's words for "Details"; another error only its text.
+kept = llm.failed(timed)
+assert set(kept) == {"error", "kind", "detail"} and kept["error"] == str(timed) and kept["kind"] == "timeout"
+assert llm.failed(ValueError("no such folder")) == {"error": "no such folder"}
 print("ok")

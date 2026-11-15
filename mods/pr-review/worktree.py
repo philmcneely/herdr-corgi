@@ -3,20 +3,26 @@
 
 argv[1]: PR url (https://github.com/<owner>/<repo>/pull/<n>); options --local <dir> (the active space's checkout of
 that repo), --root <dir> (repeatable: the clone folders to look in, the first one is where a new clone goes;
-default ~/code), --clone.
+default ~/code), --worktrees <dir> (Herdr's folder for worktrees, settings.json `worktrees.directory`; default
+~/.herdr/worktrees), --clone.
 Uses an existing clone: a dedicated one under a root (<repo> or <owner>-<repo>), else the --local checkout when its
 origin is that repo. Without one it clones only with --clone (an explicit click; into the first root,
 --filter=blob:none); otherwise exit 3 with {"need_clone": <folder>}.
-ONE reusable throwaway worktree per repo, <clone>/.worktrees/review: it fetches pull/<n>/head
-and checks that commit out detached (forced, cleaned). One path per repo keeps one warm LSP index per repo.
-Old per-PR worktrees (review-<n>) go, and a repo's review worktree goes after MAX_AGE unused, together with the
-LSP bridge's index for it (`lsp_bridge.py forget <root>`).
+ONE reusable throwaway worktree per repo, <worktrees>/<repo>/pr-review (<repo>: the main checkout's folder name,
+as Herdr's own New worktree names it): it fetches pull/<n>/head and checks that commit out detached (forced,
+cleaned). One path per repo keeps one warm LSP index per repo. Nothing is made inside the clone. A folder at that
+path is only reset when it is a detached worktree of this clone (a person's own checkout of a branch `pr-review`
+is refused, not cleaned). A repo's review worktree goes after MAX_AGE unused, together with the LSP bridge's index
+for it (`lsp_bridge.py forget <root>`).
+Earlier versions kept it at <clone>/.worktrees/review: one that is there is used on (same warm index), never made
+anew, never moved and never removed here.
 ponytail: one tree per repo, so two review copies of different PRs of one repo at once take turns; a second tree
 (LRU) when that happens for real.
 Prints {"path", "head", "clone"}; exit 1 with the reason on stderr.
 `worktree.py since <checkout> <old> <head> [<path>…]`: what changed from old to head (since_diff), as JSON.
 """
 import json
+import os
 import pathlib
 import re
 import shutil
@@ -25,6 +31,8 @@ import sys
 import time
 
 BASES = [pathlib.Path.home() / "code"]  # --root replaces it
+WORKTREES = pathlib.Path.home() / ".herdr" / "worktrees"  # --worktrees replaces it
+NAME = "pr-review"  # the review worktree's folder, where a branch's name would be (lsp_bridge.py throwaway knows it)
 MAX_AGE = 7 * 86400
 BRIDGE = pathlib.Path(__file__).with_name("lsp_bridge.py")
 
@@ -85,15 +93,31 @@ def remove(clone, tree):
         subprocess.run([sys.executable, str(BRIDGE), "forget", str(tree)], capture_output=True, timeout=60)
 
 
+def common_dir(path):
+    """The git folder a checkout shares with its repo's other checkouts (resolved), or None outside a repo."""
+    r = subprocess.run(["git", "rev-parse", "--git-common-dir"], cwd=path, capture_output=True, text=True, timeout=30)
+    return os.path.realpath(os.path.join(path, r.stdout.strip())) if r.returncode == 0 else None
+
+
+def detached(path):
+    """A checkout on no branch, as the review worktree is; a person's own worktree sits on its branch."""
+    return subprocess.run(["git", "symbolic-ref", "-q", "HEAD"], cwd=path, capture_output=True, timeout=30).returncode == 1
+
+
+def review_path(clone):
+    """Where the clone's review worktree is: the one an earlier version made inside the clone while it is there,
+    else <worktrees>/<main checkout's folder name>/pr-review.
+    ponytail: a bare clone's name is its parent folder's; clones made here are never bare."""
+    old = pathlib.Path(clone) / ".worktrees" / "review"
+    return old if (old / ".git").exists() else WORKTREES / pathlib.Path(common_dir(clone)).parent.name / NAME
+
+
 def prune(keep):
-    """Per-PR trees of the old layout, and review trees unused for MAX_AGE, in every clone under the bases.
-    ponytail: a review tree inside a --local checkout is not pruned; it is one folder, reused per repo."""
-    for wt in [w for base in BASES for w in base.glob("*/.worktrees/review*")]:
-        clone = wt.parent.parent
-        if wt != keep and (wt.name != "review" or time.time() - wt.stat().st_mtime > MAX_AGE):
-            remove(clone, wt)
-    for clone in {p.parent.parent for base in BASES for p in base.glob("*/.worktrees")}:
-        subprocess.run(["git", "worktree", "prune"], cwd=clone, capture_output=True, timeout=60)
+    """Review trees under the worktrees folder unused for MAX_AGE. Only detached ones: never a branch's checkout.
+    Trees inside a clone (earlier versions) stay."""
+    for wt in WORKTREES.glob(f"*/{NAME}"):
+        if wt != keep and (wt / ".git").is_file() and time.time() - wt.stat().st_mtime > MAX_AGE and detached(wt):
+            remove(pathlib.Path(common_dir(wt)).parent, wt)
 
 
 def since_diff(cwd, old, head, paths=()):
@@ -123,19 +147,18 @@ def main(url, clone=False, local=None):
         raise RuntimeError(f"Not a PR url: {url}")
     owner, repo, n = m.groups()
     clone = clone_for(owner, repo, clone, local)
-    exclude = pathlib.Path(clone, git("rev-parse", "--git-path", "info/exclude", cwd=clone))  # a linked worktree has a .git file
-    if ".worktrees/" not in (exclude.read_text() if exclude.exists() else ""):
-        exclude.parent.mkdir(exist_ok=True)
-        with exclude.open("a") as f:
-            f.write("\n.worktrees/\n")
     git("fetch", "--quiet", "origin", f"+pull/{n}/head:refs/review/{n}", cwd=clone)
     head = git("rev-parse", f"refs/review/{n}", cwd=clone)
-    path = clone / ".worktrees" / "review"
+    path = review_path(clone)
     if (path / ".git").exists():
+        if not (detached(path) and common_dir(path) == common_dir(clone)):  # forced and cleaned below: only our own
+            raise RuntimeError(f"{path} is not this review's checkout (a worktree of {clone} on no branch). Move that folder away, or set another worktrees.directory in Herdr's settings.json.")
         git("checkout", "--quiet", "--detach", "--force", head, cwd=path)
         git("clean", "-fdq", cwd=path)
     else:
-        git("worktree", "add", "--quiet", "--detach", "--force", str(path), head, cwd=clone)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        git("worktree", "prune", cwd=clone)  # a review worktree removed by hand is forgotten, so its path is free again
+        git("worktree", "add", "--quiet", "--detach", str(path), head, cwd=clone)
     path.touch()
     prune(path)
     print(json.dumps({"path": str(path), "head": head, "clone": str(clone)}))
@@ -150,6 +173,7 @@ if __name__ == "__main__":
             opt = lambda name: args[args.index(name) + 1] if name in args else None  # noqa: E731
             roots = [pathlib.Path(a).expanduser() for o, a in zip(args, args[1:]) if o == "--root"]
             BASES = roots or BASES
+            WORKTREES = pathlib.Path(opt("--worktrees")).expanduser() if opt("--worktrees") else WORKTREES
             main(sys.argv[1], "--clone" in args, opt("--local"))
     except NeedClone as e:
         print(json.dumps({"need_clone": str(e.dest)}))

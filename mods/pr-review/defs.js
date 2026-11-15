@@ -1,8 +1,8 @@
 // Go-to-definition and hover for the diff, through lsp_bridge.py (real language servers, kept warm by one local
-// HTTP daemon). One `exec` per app session starts or finds the bridge; every hover/click after that is a `fetch` to
-// 127.0.0.1 with the bridge's token. Results are cached per (root, rev, path, line, character).
+// HTTP daemon). A bridge that already runs is found through its state file, without starting a process; else one
+// `exec` per app session starts it. Every hover/click after that is a `fetch` to 127.0.0.1 with the bridge's token. Results are cached per (root, rev, path, line, character).
 // Also: Markdown link targets (relative files, #anchors, web links) and the VS Code jump.
-import { exec, appHome } from "herdr";
+import { exec, appHome, readTextFile } from "herdr";
 
 const BRIDGE = () => `${appHome()}/mods/pr-review/lsp_bridge.py`;
 const LSP_EXT = new Set(["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs", "py", "pyi", "go", "rs", "tf", "tfvars", "java",
@@ -16,13 +16,23 @@ let conn = null, viaExec = false;
 const cache = new Map();
 const MAX = 500;
 
+// The bridge that runs already (after a mod reload, or started by go-to-definition before): port and token from its
+// state file, when it answers. A process start is the expensive part of a lookup, so none for a bridge that is there.
+async function running() {
+  try {
+    const st = JSON.parse(await readTextFile(`${appHome()}/pr-data/lsp-bridge.json`));
+    const r = await fetch(`http://127.0.0.1:${st.port}/health`, { headers: { "X-Bridge-Token": st.token } });
+    return r.status === 200 ? { port: st.port, token: st.token } : null;
+  } catch { return null; }
+}
+
 function connect(fresh = false) {
   if (!conn || fresh) {
-    conn = exec("python3", [BRIDGE(), "start"], { timeout: 20000 }).then((r) => {
+    conn = (fresh ? Promise.resolve(null) : running()).then((st) => st ?? exec("python3", [BRIDGE(), "start"], { timeout: 20000 }).then((r) => {
       const c = JSON.parse(r.stdout || "{}");
       if (!c.port) throw new Error(c.message || r.stderr || "LSP bridge did not start");
       return c;
-    });
+    }));
     conn.catch(() => { conn = null; });
   }
   return conn;

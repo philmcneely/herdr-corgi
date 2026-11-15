@@ -8,7 +8,8 @@ rules: first match wins, path rules on the session folder, remote rules on the r
 file {session id: {title}} with better session titles)}. Each PR's `context` follows the rules, else the folder its
 transcript is in; `sessionContext` is the context whose config folder holds the session, which `claude --resume`
 needs. Also prunes pr-data/cache (prune_cache; `prs.py --prune` does only that).
-Exit 0: complete. Exit 2: written, but some PR states could not be read (report["errors"]).
+Exit 0: complete. Exit 2: written, but some PR states could not be read (report["errors"]). Exit 3: written, but none
+of the states asked for could be read (no network, gh not signed in): the panel then waits longer before the next scan.
 """
 import concurrent.futures
 import datetime as dt
@@ -248,11 +249,16 @@ def run(req=None):
                     "head": s.get("headRefName"), "headSha": s.get("headRefOid"), "base": s.get("baseRefName"),
                     "updatedAt": s.get("updatedAt")})
     out.sort(key=lambda p: p["at"] or "", reverse=True)
-    report = {"generated": dt.datetime.now().astimezone().isoformat(), "prs": out, "errors": errors}
+    report = {"generated": dt.datetime.now().astimezone().isoformat(), "prs": out, "errors": errors, "asked": len(due)}
     save("prs.json", report)
     old = [u for u, s in gh.items() if s.get("state") in ("MERGED", "CLOSED") and now - (time.mktime(time.strptime(s["updatedAt"][:19], "%Y-%m-%dT%H:%M:%S")) if s.get("updatedAt") else now) > CLOSED_KEEP]
     prune_cache(old)
     return report
+
+
+def exit_code(errors, asked):
+    """0 complete, 2 some states unread, 3 every state asked for unread (GitHub could not be reached at all)."""
+    return 3 if asked and errors >= asked else 2 if errors else 0
 
 
 if __name__ == "__main__":
@@ -261,4 +267,4 @@ if __name__ == "__main__":
         sys.exit(0)
     r = run(json.loads(sys.argv[1]) if sys.argv[1:] else None)
     print(f"{len(r['prs'])} PRs, {len(r['errors'])} errors", file=sys.stderr)
-    sys.exit(2 if r["errors"] else 0)
+    sys.exit(exit_code(len(r["errors"]), r["asked"]))

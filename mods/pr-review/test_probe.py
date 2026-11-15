@@ -47,11 +47,12 @@ def run(name, body, *extra, env=None, cli=False):
 
 
 HEADER = "import sys\nsys.path.insert(0, sys.argv[1])\nimport lib\n"
-# A harmless probe: it reproduces on the head, not on the base; the result file sits next to the script.
+# A harmless probe: it reproduces on the head, not on the base; the result carries the script that ran, and nothing
+# is written next to it.
 code, r = run("double", HEADER + "n = lib.mails(10)\nprint('strength: forced_schedule')\nprint(f'reproduced mailer.send: {n} calls for 10 records' if n != 10 else f'not_reproduced {n} calls')\n", "--base", base, cli=True)
 assert code == 0 and r["status"] == "reproduced" and r["line"] == "mailer.send: 20 calls for 10 records" and r["strength"] == "runs_pr_code", "what the script prints about its strength does not count"
 assert r["base"]["status"] == "not_reproduced" and r["pre_existing"] is False and r["head"] and r["base"]["rev"] == base, r
-assert json.loads((repo / probe.PROBE_DIR / "double.result.json").read_text())["status"] == "reproduced"
+assert r["script"].startswith(HEADER) and sorted(os.listdir(repo / probe.PROBE_DIR)) == ["double.py"], "the review takes the script from the result; no result file"
 # The same failure on the base: there before this PR.
 code, r = run("old", HEADER + "print('reproduced it returns', lib.mails(1) >= 1)\n", "--base", base)
 assert r["status"] == "reproduced" and r["pre_existing"] is True, r
@@ -168,19 +169,22 @@ code, r = run("leak", "print('" + MAIL + " ghp_' + 'a' * 36 + ' token=abc123 Bea
 assert r["status"] == "reproduced" and "ada@" not in json.dumps(r) and "ghp_" not in r["output"] and "abc123" not in r["output"] and "AKIA" not in r["output"] and "token=[redacted]" in r["output"], r
 assert probe.redact("password: hunter2 and x" + "@" + "y.io") == "password: [redacted] and [redacted]"
 
-# Refused calls: a bad id, a script that is a link, a result path that is a link, the folder as a link, no checkout.
+# Refused calls: a bad id, a script that is a link (its target is never read: nothing of it in the answer), a link
+# that points nowhere, a folder in its place, a script too large, the folder as a link, no checkout. No script: exit 3.
 for bad in ["../x", "a/b", "*", "a b", "", "x" * 41]:  # the id is the script's file name: 1 to 40 letters, digits, - and _
     r = subprocess.run([sys.executable, ME, str(repo), bad], capture_output=True, text=True)
     assert r.returncode == 2 and "refused" in r.stderr, bad
 assert probe.ID.fullmatch("ok_1-" + "y" * 35)
 (outside / "evil.py").write_text("print('reproduced from outside')\n")
 os.symlink(outside / "evil.py", repo / probe.PROBE_DIR / "linked.py")
-r = subprocess.run([sys.executable, ME, str(repo), "linked"], capture_output=True, text=True)
-assert r.returncode == 2 and "plain file" in r.stderr, r.stderr
-(repo / probe.PROBE_DIR / "trap.py").write_text("print('reproduced x')\n")
-os.symlink(outside / "victim.json", repo / probe.PROBE_DIR / "trap.result.json")
-r = subprocess.run([sys.executable, ME, str(repo), "trap"], capture_output=True, text=True)
-assert r.returncode == 2 and not (outside / "victim.json").exists(), r
+os.symlink(outside / "nowhere.py", repo / probe.PROBE_DIR / "dangling.py")
+(repo / probe.PROBE_DIR / "folder.py").mkdir()
+(repo / probe.PROBE_DIR / "big.py").write_text("#" * (probe.SCRIPT_CAP + 1))
+for name, why in (("linked", "plain file"), ("dangling", "plain file"), ("folder", "plain file"), ("big", "larger than")):
+    r = subprocess.run([sys.executable, ME, str(repo), name], capture_output=True, text=True)
+    assert r.returncode == 2 and why in r.stderr and r.stdout == "" and "from outside" not in r.stderr, (name, r.stderr)
+r = subprocess.run([sys.executable, ME, str(repo), "never-written"], capture_output=True, text=True)
+assert r.returncode == 3 and "is not there" in r.stderr and r.stdout == "", r
 r = subprocess.run([sys.executable, ME, "repo", "double"], capture_output=True, text=True)
 assert r.returncode == 2
 r = subprocess.run([sys.executable, ME, str(repo), "double", "--base", "--output=x"], capture_output=True, text=True)

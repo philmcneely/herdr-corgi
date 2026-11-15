@@ -6,10 +6,26 @@ import { registerHooks } from "node:module";
 import { homedir } from "node:os";
 
 const stub = `import { execFile } from "node:child_process";
+import { readFile } from "node:fs/promises";
+export const readTextFile = (p) => readFile(p, "utf8");
 export const appHome = () => process.env.HERDR_APP_HOME || "${homedir()}/.config/herdr-app";
-export const exec = (cmd, args, o = {}) => new Promise((ok) => execFile(cmd, args, { cwd: o.cwd, timeout: o.timeout }, (e, stdout, stderr) => ok({ code: e ? e.code ?? 1 : 0, stdout, stderr })));`;
+export const exec = (cmd, args, o = {}) => new Promise((ok) => (globalThis.__execs ??= []).push(args.at(-1)) && execFile(cmd, args, { cwd: o.cwd, timeout: o.timeout }, (e, stdout, stderr) => ok({ code: e ? e.code ?? 1 : 0, stdout, stderr })));`;
 registerHooks({ resolve: (s, c, next) => (s === "herdr" ? { url: `data:text/javascript,${encodeURIComponent(stub)}`, shortCircuit: true } : next(s, c)) });
 const d = await import("./defs.js");
+
+// A bridge that runs already is used as it is: port and token from its state file, no process started for it.
+{
+  const { createServer } = await import("node:http"), { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs"), { tmpdir } = await import("node:os");
+  const seen = [], srv = createServer((q, res) => { seen.push(`${q.method} ${q.url} ${q.headers["x-bridge-token"]}`); res.setHeader("Content-Type", "application/json"); res.end(JSON.stringify({ status: "ok", servers: [] })); });
+  await new Promise((ok) => srv.listen(0, "127.0.0.1", ok));
+  const home = mkdtempSync(`${tmpdir()}/defs-`), before = process.env.HERDR_APP_HOME; mkdirSync(`${home}/pr-data`);
+  writeFileSync(`${home}/pr-data/lsp-bridge.json`, JSON.stringify({ port: srv.address().port, token: "tok", pid: 1 }));
+  process.env.HERDR_APP_HOME = home;
+  assert.deepEqual(await d.call("/status", {}), { status: "ok", servers: [] });
+  assert.deepEqual([seen, globalThis.__execs ?? []], [["GET /health tok", "POST /status tok"], []], "found by its state file and asked: no lsp_bridge.py start");
+  srv.close(); srv.closeAllConnections();
+  if (before === undefined) delete process.env.HERDR_APP_HOME; else process.env.HERDR_APP_HOME = before;
+}
 
 assert.ok(d.supported("a/b.ts") && d.supported("x.java") && d.supported("s.ino") && !d.supported("README.md"));
 assert.deepEqual(await d.lookup({ root: null, path: "a.py", line: 1, character: 0 }), { status: "no-root", message: "Repo not local", definitions: [], markdown: "" });

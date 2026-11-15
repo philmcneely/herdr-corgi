@@ -26,6 +26,11 @@
       "path": "mods/dictate",
       "default": true
     },
+    "worktrees": {
+      "repo": "https://github.com/saefty/herdr-corgi-worktrees.git",
+      "path": "mods/worktrees",
+      "default": true
+    },
     "resume": {
       "repo": "https://github.com/saefty/herdr-corgi-resume.git",
       "path": "mods/resume",

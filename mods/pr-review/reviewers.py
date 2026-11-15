@@ -5,7 +5,7 @@ argv[1]: JSON {kind: "claude"|"security"|"codex", url, number, context ({id, env
 model or alias from models.py; haiku runs as sonnet, llm.code_model), codexModel (a Codex slug from models.py; none: Codex's default), worktree (a detached checkout of the PR head, worktree.py), base (the PR's base branch),
 head (sha), level (code-review effort: low|medium|high), file (pr-data/findings/<url hash>.json)}.
 Runs the reviewer read-only in the worktree (Claude: Read/Grep/Glob/Agent and read-only git/gh Bash only, no edits;
-Codex: sandbox_mode=read-only), turns its answer into findings {id, reviewer, file, line, end, severity, title,
+Codex: codex_args()), turns its answer into findings {id, reviewer, file, line, end, severity, title,
 detail, suggestion, code, and when the reviewer gave them: category, impact, effect, preconditions, certainty (see
 review.py: the severity follows from the impact by the fixed scale)} and merges them into `file` under that reviewer
 (other reviewers' findings and every status stay). A review that comes back as text (Codex's, or a slash command that
@@ -50,7 +50,8 @@ def permissions(worktree):
 def allowed(req):
     """What the run is allowed to do, as rules (runs[kind].allowed; the Security page shows it)."""
     if req["kind"] == "codex":
-        return ["codex review: sandbox_mode read-only, approval_policy never"]
+        return ["codex exec review: reads the checkout and its clone's .git only, no writes, no network for its commands, "
+                "no MCP servers, hooks, plugins or apps, no Codex config of the user or the PR, approval_policy never"]
     return review.allowed_rules(permissions(req["worktree"]))
 PLACE = {"file": review.S, "line": {"type": "integer"}, "end": {"type": "integer"}, **review.PROSE}
 # A review turned from text: what its words give, nothing judged on top.
@@ -66,10 +67,14 @@ ASK = ("When you are done, answer with the requested JSON. findings: file (path 
        "test, availability), " + review.JUDGED_TEXT + ", title (one line, plain text), detail (why it is a problem; claim only what the "
        "certainty covers), suggestion (the fix, optional). " + review.TEXTS + " Only real problems; an empty list is fine. scope: your own report "
        "of the work: read (the files you read), checked (one row per area, each with " + review.CHECKED_TEXT + "), skipped "
-       "(what you left out and why, short phrases).")
+       "(what you left out and why, short phrases about the PR, e.g. \"the diff: read the changed files whole instead\"; "
+       "never a tool, a command or a permission).")
 # ---- The security view: trust zones over the analysis' picture, who may do what on the PR's resources (access), from
 # where each finding is reachable, and a threat model of the places the PR opens or changes across a trust boundary.
-TRUST = ["public", "authenticated", "internal", "data"]
+# From the most exposed inwards. operator: a person's workstation or a CI runner outside the system that acts on it
+# with its own credentials (it is not public, and it is not a part of the system either).
+TRUST = ["public", "operator", "authenticated", "internal", "data"]
+RULES = 2  # the security view's rules, written into each view (pr.js secNote: an older one is offered a re-run)
 AUTH_KINDS = ["none", "code", "gateway", "iam"]
 REACH = ["public", "authenticated", "internal_only", "unknown"]
 THREAT_RESULTS = ["finding", "mitigated", "not_assessed"]
@@ -78,6 +83,9 @@ CHECKS = ["none", "network", "token", "signature", "iam"]  # what a gate checks
 PRINCIPAL_KINDS = ["internet", "operator", "ci", "role"]
 CHANGES = ["added", "widened", "narrowed", "removed", "unchanged"]
 STRIDE = ["S", "T", "R", "I", "D", "E"]
+EFFECTS = ["allow", "deny"]  # deny: a rule that takes a right away or narrows it (a guard at the resource, no grant)
+DATA_KINDS = ["credential", "secret", "personal", "content", "other"]  # what a sensitive field is (dataflow.js KINDS)
+SINKS = ["log", "error", "queue", "store", "third_party", "response"]  # where it ends or stays (dataflow.js SINKS)
 S = review.S
 WHERE = {"type": "object", "properties": {"access": S, "from": S, "to": S}}
 SECURITY = {
@@ -86,33 +94,49 @@ SECURITY = {
     "access": {"type": "array", "maxItems": 16, "items": {"type": "object", "required": ["id", "resource", "kind", "principal", "principal_kind", "change", "actions", "public",
                                                                                          "auth", "auth_kind", "at"], "properties": {
         "id": S, "resource": S, "kind": S, "principal": S, "principal_kind": {"enum": PRINCIPAL_KINDS}, "principal_node": S, "change": {"enum": CHANGES}, "actions": review.STRINGS,
-        "public": {"type": "boolean"}, "auth": S, "auth_kind": {"enum": AUTH_KINDS}, "used": {"type": "boolean"}, "at": S, "node": S}}},
+        "public": {"type": "boolean"}, "auth": S, "auth_kind": {"enum": AUTH_KINDS}, "used": {"type": "boolean"}, "at": S, "node": S, "effect": {"enum": EFFECTS},
+        "holds_against": S}}},
     "gates": {"type": "array", "items": {"type": "object", "required": ["where", "principal", "check", "at", "source", "holds_if", "carries"], "properties": {
         "where": WHERE, "principal": S, "check": {"enum": CHECKS}, "at": S, "source": {"enum": ["config", "code"]}, "holds_if": S, "carries": review.STRINGS}}},
     "threats": {"type": "array", "items": {"type": "object", "required": ["where", "boundary", "threat", "stride", "findings", "result", "goal"], "properties": {
         "where": WHERE, "boundary": S, "threat": S, "stride": {"enum": STRIDE}, "findings": review.STRINGS, "result": {"enum": THREAT_RESULTS}, "goal": S,
-        "path": review.STRINGS, "evidence": S, "note": S}}}}
+        "path": review.STRINGS, "evidence": S, "note": S}}},
+    "data": {"type": "array", "maxItems": 8, "items": {"type": "object", "required": ["id", "name", "kind", "steps"], "properties": {
+        "id": S, "name": S, "kind": {"enum": DATA_KINDS}, "steps": {"type": "array", "items": {"type": "object", "required": ["node"], "properties": {
+            "node": S, "at": S, "sink": {"enum": SINKS}, "protected": S, "retention": S}}}}}}}
 ASK_SECURITY = (
     " Each finding also has ref (f1, f2, … in order; threats name findings by it) and reachability (who can reach the flaw: "
     "public, authenticated, internal_only, or unknown when the code does not show it). In infrastructure code, a permission "
     "the diff grants that no code uses and an entry point (a route, a function URL, a public bucket) without an authorizer "
     "are findings at their lines. zones: the trust zones the code and the infrastructure code show, at most 8, none from "
     "guessing: id, name (e.g. \"Internet\", \"HTTP API\", \"Orders function\", \"Orders queue\"), trust (public: anyone "
-    "reaches it without credentials; authenticated: reached only after the caller was checked, at a gateway or in code; "
+    "reaches it without credentials; operator: a person's workstation or a CI runner outside the system, from where an "
+    "admin script, a console or a deploy job acts with its own credentials, never public, and only that machine: the "
+    "account or service such a script acts on is internal or data, in a zone of its own; authenticated: reached only after the caller was checked, at a gateway or in code; "
     "internal: reached only by the system's own parts, through IAM or the network; data: where state is kept, e.g. a queue, "
     "table, bucket or store), evidence (file:line), nodes (the ids of the picture's nodes in it, from the list in the prompt; "
-    "a module takes the zone of the unit it runs in; a node in at most one zone). access: who may do what on the resources "
+    "a module takes the zone of the unit it runs in; a node in at most one zone). Whoever calls from outside stands in a zone of its own, apart from "
+    "the system's parts it calls: a sender on the internet in a public one, an operator's workstation or a CI runner in an operator one. Another "
+    "cloud account, organisation or provider is a zone of its own and its name says which one (e.g. \"Management account: "
+    "Organizations\"); never parts of two accounts in one zone. access: who may do what on the resources "
     "that the PR's code and infrastructure code add or change (IAM policies and roles, resource policies, routes and their "
     "authorizers, public flags), one row per grant or entry point, at most 16: id (acc1, acc2, … in order), resource (its "
-    "name in the template), kind (e.g. queue, function, route, bucket, table), principal (who gets it: a function, a role, "
+    "name in the template; \"*\" when the grant names every resource), kind (e.g. queue, function, route, bucket, table), principal (who gets it: a function, a role, "
     "\"anyone on the internet\"), principal_node (the id of the picture's node or group (frame) that is the principal, e.g. "
     "the group of the function whose role gets the grant; none when no node or group is it), principal_kind (internet: anyone from outside; operator: a person running a script, the "
     "console or a manual deploy; ci: a CI or deploy pipeline; role: a role or function of the system), change (added, "
     "widened, narrowed, removed or unchanged: what this PR does to the grant or entry), actions (e.g. sqs:SendMessage, "
-    "\"call GET /items\"), public (true when it is reachable without credentials of the cloud account), auth (what checks "
+    "\"call GET /items\"; a wildcard as the policy writes it, e.g. \"s3:*\" or \"*\"), public (true when it is reachable without credentials of the cloud account), auth (what checks "
     "the caller, e.g. \"bearer token checked in handler.py\"), auth_kind (none: nothing checks the caller; code: a check in "
     "the application's code; gateway: an authorizer or key at the gateway; iam: the cloud's IAM), used (false when nothing "
-    "in the code uses the grant), at (file:line), node (the id of its picture node, if any). Ways of operators and CI that "
+    "in the code uses the grant), at (file:line), node (the id of its picture node, if any), effect (deny for a rule "
+    "that takes a right away or narrows it: a deny statement, a condition such as TLS only, a public access block, a "
+    "guardrail policy; then principal is who is denied, actions what is denied without the word deny, auth the kind of "
+    "rule, holds_against what the rule stops in one sentence (who is kept from doing what, e.g. \"another role of the "
+    "account sends forged events to the queue\"), change what this PR does to the rule (added; widened: it now denies "
+    "more; narrowed: it now denies less, e.g. a longer exception list or fewer actions; removed; unchanged), and the "
+    "row is a guard at its resource, never a grant or a way in, and node is required: the picture node of the resource it protects; a guard the PR narrows or removes is a finding at "
+    "its line unless the diff puts another check in its place; else allow or left out), holds_against (only for a guard). Ways of operators and CI that "
     "the PR adds or changes (admin scripts, workflows, deploy jobs, guardrails they switch) are rows of their own; empty "
     "when the PR touches no such place. A crossing is an access row, or a call between two picture nodes in zones of "
     "different trust: once you have the zones, go through the picture's edges and take every edge whose two ends lie in "
@@ -130,16 +154,39 @@ ASK_SECURITY = (
     "missing retry: that is a finding); for an access row that grants a principal a right into another zone (a role or "
     "function allowed to send to a queue, read a table, invoke another function), the threat to name first is the misuse "
     "of that right by an attacker who has taken over the principal, with goal what they then reach, also when the code "
-    "uses the right correctly or not at all; "
+    "uses the right correctly or not at all; that the attacker must first take over the principal is the premise, not a "
+    "reason for not_assessed: it is mitigated when the grant names only the actions and resources the code uses "
+    "(evidence: the line of the policy that limits it, note: what it is limited to) and a finding when it is wider; "
+    "for a deny row the threat is what the rule stops, mitigated with the rule's line as evidence; "
+    "for an operator's script or a workflow: what the widest thing is its credentials can do, in which account; "
+    "for a way in checked by a shared secret or a signature (a webhook): also a replayed genuine request, and what a "
+    "forged or replayed message sets off behind the place it is stored (each mitigated with evidence, a finding, or "
+    "not_assessed with the reason); "
     "one entry per concrete threat, no two alike: where (as for gates), boundary (the boundary crossed, e.g. \"Internet → "
     "Front desk function\"), threat (one sentence about this code: who does what, through which line), stride (one letter: "
     "S spoofing, T tampering, R repudiation, I information disclosure, D denial of service, E elevation of privilege), "
-    "findings (the refs of your findings that show it), result (finding: a finding shows it; mitigated: the code holds "
+    "findings (the refs of only those findings that make this threat possible or worse: the check that is missing or fails, "
+    "the grant that is wider than needed, the limit every caller shares; never a plain defect that merely sits at the "
+    "same place, such as a call that is never made, a wrong value or lost work, which gives the attacker nothing: "
+    "leave it out, and without such a finding the threat is mitigated or not_assessed), result (finding: a finding shows it; mitigated: the code holds "
     "against it, and evidence names the file:line that shows it; not_assessed: you did not check it), goal (what an "
     "attacker reaches in the end, one sentence), path (the ids of the nodes or groups from the principal to what the "
     "attacker reaches, also the steps that cross no boundary, e.g. [\"internet\", \"handler\", \"consumer\", \"mailer\"]), "
     "evidence (file:line, for mitigated), note (a few words; for not_assessed the reason). A finding's reachable_from "
-    "and reachability name the same place as the threat that names it.")
+    "and reachability name the same place as the threat that names it. data: the sensitive data the PR's code reads, "
+    "passes on, writes or sends, at most 8, only what the code shows and none from guessing: id (d1, d2, … in order), "
+    "name (as the code calls it, e.g. \"bearer token (Authorization header)\", \"member's mail address\"), kind "
+    "(credential: what proves who someone is, e.g. a token, a password, a session, an API key; secret: a value the "
+    "system keeps to itself, e.g. a signing key or a shared secret in configuration; personal: data about a person, "
+    "e.g. a mail address, a name, an id document, payment data; content: what users wrote or uploaded; other), steps "
+    "(its way in order, one step for each place where it starts, is passed on, is written or is sent: node (the id of "
+    "the picture's node it is at), at (file:line), sink (only where it ends or stays: log: written to a log; error: "
+    "put into an error message or an exception's text; queue; store: a table, bucket, file or cache; third_party: "
+    "sent to a service outside the system; response: returned to the caller; left out where it only passes), "
+    "protected (how it is protected at this step in a few words, e.g. \"TLS\", \"encrypted with the bucket's KMS "
+    "key\", \"masked\", \"hashed\", \"compared in constant time, never stored\"; empty when the code does not "
+    "say, never a guess), retention (for a log, a queue or a store: the rule that removes it, with its file:line; "
+    "empty when the code names none)). Empty when the PR's code touches no such data.")
 ASK_JSON = "\n\n" + ASK
 
 
@@ -173,6 +220,12 @@ SECURITY_STEPS = (
     "(e.g. a send to the queue the policy names); a grant with no such call is a finding at the grant's line, also when "
     "another finding explains why the call is missing; and is it wider than the code needs (actions, resources, "
     "principals, public access);\n"
+    "- a way in checked by a shared secret or a signature (a webhook, a callback): is the comparison constant-time; can a "
+    "genuine request be replayed (a timestamp or delivery id that is checked); is the body size and the rate limited "
+    "before the check, and does one caller's flood take the limit from the others; where is the secret kept, who can "
+    "read or set it and how is it changed; what does a forged or replayed message set off downstream;\n"
+    "- an operator's script or a workflow: which account and role it needs, and whether it can leave a guardrail off "
+    "or data behind when it stops halfway;\n"
     "- input: each field a caller or a message controls, and what it reaches without a check (ids, paths, queries, "
     "commands, templates, deserialization, a state the record must be in);\n"
     "- secrets: hard-coded values, unsafe defaults, a secret the deployment never sets, secrets in errors or logs;\n"
@@ -300,7 +353,9 @@ def security_view(answer, findings, pic, changed, root=None):
     trust); gates [{where, principal, check, at, source, holds_if, carries}]; threats [{id: t1.., where, boundary,
     threat, stride, findings: finding ids, result, goal, evidence, note, derived?}]; effective_zones [{node, drawn,
     effective, where}]; bypasses [{from, to, edge}] (a call in one process between
-    zones of different trust: no crossing, but it needs a threat like one). where is {access} or {from, to, edge}.
+    zones of different trust: no crossing, but it needs a threat like one); data [{id: d1.., name, kind, steps: [{node,
+    at, sink?, protected, retention}]}] (the sensitive data the PR's code moves, each with its way over the picture's
+    cards). where is {access} or {from, to, edge}.
     Also: a node without a zone of its own stands in the zone of what it runs_in; access[].principal_node only when the
     picture has that node or group (else None); threats[].path only ids the picture has (and "internet" first); a
     finding whose threat sits at another place than its reachable_from gets reach_conflict and the more exposed of the
@@ -318,9 +373,13 @@ def security_view(answer, findings, pic, changed, root=None):
     ids, frames = {n.get("id") for n in nodes}, {g.get("id") for g in arch.get("groups") or []}
     runs_in = {n.get("id"): review.runs_in_of(n) for n in nodes if n.get("runs_in")}
     zones, zone_of = [], {}
+    # The cards an operator or a pipeline acts through (its scripts and workflows): a zone of only such cards is the
+    # operator's, whatever the answer calls it (a laptop is not public).
+    scripts = {r.get("node") for r in answer.get("access") or [] if isinstance(r, dict) and r.get("principal_kind") in ("operator", "ci") and r.get("node")}
     for z in answer.get("zones") or []:
         if isinstance(z, dict) and z.get("id") and z.get("trust") in TRUST and z["id"] not in [x["id"] for x in zones]:
             mine = [n for n in dict.fromkeys(z.get("nodes") or []) if n in ids and n not in zone_of]
+            z = {**z, "trust": "operator"} if mine and set(mine) <= scripts else z
             zone_of.update((n, z) for n in mine)
             zones.append({"id": str(z["id"]), "name": str(z.get("name") or z["id"]), "trust": z["trust"], "evidence": str(z.get("evidence") or ""), "nodes": mine})
     for n in ids:  # code without a deployment of its own stands where it runs; in several, the most exposed zone
@@ -339,7 +398,17 @@ def security_view(answer, findings, pic, changed, root=None):
         if found:
             zone_of[n] = min(found, key=lambda z: TRUST.index(z["trust"]))
     trust = lambda n: (zone_of.get(n) or {}).get("trust")  # noqa: E731
-    differ = lambda e: trust(e.get("from")) and trust(e.get("to")) and trust(e["from"]) != trust(e["to"])  # noqa: E731
+    # A call crosses a boundary between zones of different trust, and between two zones of one trust level when it
+    # leaves a cloud account (a frame whose kind says account, subscription, tenant or organisation).
+    group_of = {n.get("id"): n.get("group") for n in nodes}
+    accounts = {g.get("id") for g in arch.get("groups") or [] if ACCOUNT.search(str(g.get("kind") or ""))}
+
+    def differ(e):
+        a, b = zone_of.get(e.get("from")), zone_of.get(e.get("to"))
+        if not a or not b or a["id"] == b["id"]:
+            return False
+        ga, gb = group_of.get(e["from"]), group_of.get(e["to"])
+        return a["trust"] != b["trust"] or (ga != gb and bool({ga, gb} & accounts))
     crossing = [{"from": e["from"], "to": e["to"], "edge": f"e{k}"} for k, e in enumerate(edges) if differ(e) and not e.get("in_process")]
     # A call in one process bypasses a boundary when it reaches code written for another source of input: a callee with
     # a way in of its own (a crossing into it, or an access row at it), as a queue consumer's handler. A library called
@@ -352,6 +421,13 @@ def security_view(answer, findings, pic, changed, root=None):
             continue
         row = {**{k: v for k, v in r.items() if (k != "node" or v in ids) and (k != "principal_kind" or v in PRINCIPAL_KINDS) and (k != "change" or v in CHANGES)},
                "id": f"acc{len(rows) + 1}", "principal_node": r.get("principal_node") if r.get("principal_node") in ids | frames else None}
+        row.pop("effect", None)
+        if is_guard(r):  # a rule that takes a right away: a guard at its resource, no grant and no crossing
+            row["effect"] = "deny"
+            if not row.get("node"):  # the answer left its card out: the card its resource names, else the one card of its kind
+                row["node"] = guard_node(r, nodes, answer.get("access") or [])
+                if not row["node"]:
+                    del row["node"]
         named.setdefault(str(r.get("id") or row["id"]), row["id"])
         if changed is not None:
             path, line = spot(row)
@@ -396,13 +472,40 @@ def security_view(answer, findings, pic, changed, root=None):
                         "stride": t.get("stride") if t.get("stride") in STRIDE else "", "findings": found, "result": result, "goal": str(t.get("goal") or ""),
                         "path": [str(x) for k, x in enumerate(t.get("path") or []) if x in ids | frames or (k == 0 and x == "internet")],
                         "evidence": str(t.get("evidence") or ""), "note": str(t.get("note") or "")})
+    # A finding a named threat stands on is a security finding, whatever its effect is called (pr.js isSecurity reads
+    # `threats`): a flood at a public way in is about availability and still an attack.
+    by_id = {f["id"]: f for f in findings}
+    for t in threats:
+        if t["result"] == "finding" and not DEFECT.search(f"{t['goal']} {t['note']}"):
+            for fid in t["findings"]:
+                by_id[fid].setdefault("threats", []).append(t["id"])
     name = lambda n: (zone_of.get(n) or {}).get("name") or n  # noqa: E731
-    open_ = [({"access": r["id"]}, f"{r.get('principal') or 'caller'} → {r['resource']}") for r in rows if place({"access": r["id"]})[2]] + \
+    # A row is a crossing to assess unless it is a guard (it protects; one the PR narrows or removes is to assess: what
+    # it no longer stops), or a right of a known principal on something the picture does not show (a role's own log
+    # group): that one stays in the list of rights.
+    off_map = lambda r: bool(r.get("principal_node")) and not r.get("node") and not r.get("public") and r.get("principal_kind") not in ("operator", "ci")  # noqa: E731
+    open_ = [({"access": r["id"]}, f"{r.get('principal') or 'caller'} → {r['resource']}") for r in rows
+             if place({"access": r["id"]})[2] and (r.get("change") in LOOSENED if r.get("effect") == "deny" else not off_map(r))] + \
             [(dict(c), f"{name(c['from'])} → {name(c['to'])}") for c in crossing + bypasses if place(c)[2]]
-    # A call from a public card into a card with a public access row is that row's way in, not a second crossing.
-    same = lambda w: [{"access": r["id"]} for r in rows if w.get("edge") and r.get("public") and r.get("node") == w["to"] and trust(w["from"]) == "public"]  # noqa: E731
+
+    # A call and an access row are one place: a call from a public card into a card with a public row (that row's way
+    # in); a right whose principal (a card, or its frame) makes the call to the row's card; a row at the calling card
+    # itself (an operator's script) whose threat walks the call in its path.
+    def same(w):
+        if not w.get("edge"):
+            return []
+        walks = lambda t: any((a, b) == (w["from"], w["to"]) for a, b in zip(t["path"], t["path"][1:]))  # noqa: E731
+        return [{"access": r["id"]} for r in rows if r.get("effect") != "deny" and (
+            (r.get("public") and r.get("node") == w["to"] and trust(w["from"]) == "public")
+            or (r.get("node") == w["to"] and r.get("principal_node") in (w["from"], group_of.get(w["from"])) and r.get("principal_node"))  # also an operator's row at what its script reaches
+            # an operator's or pipeline's row names its script as its card or as its principal: the script's one call
+            # over a boundary, or of several the one a threat at the row walks
+            or (r.get("principal_kind") in ("operator", "ci") and w["from"] in (r.get("node"), r.get("principal_node")) and w in crossing
+                and (sum(c["from"] == w["from"] for c in crossing) == 1 or any(t["where"] == {"access": r["id"]} and walks(t) for t in threats))))]
+    # ... and the other way round: a row is named when a threat sits at the call that is the same place.
+    calls_of = lambda w: [dict(c) for c in crossing + bypasses if w in same(c)] if w.get("access") else []  # noqa: E731
     for where, boundary in open_:
-        if not any(t["where"] in (where, *same(where)) for t in threats):
+        if not any(t["where"] in (where, *same(where), *calls_of(where)) for t in threats):
             threats.append({"id": f"t{len(threats) + 1}", "where": where, "boundary": boundary, "threat": "No threat was named for this crossing.", "stride": "",
                             "findings": [], "result": "not_assessed", "goal": "", "path": [], "evidence": "", "note": "No threat was named for this crossing.", "derived": True})
     effective = {}
@@ -417,12 +520,24 @@ def security_view(answer, findings, pic, changed, root=None):
             effective[node] = {"node": node, "drawn": drawn, "effective": caller, "where": w}
     reach_conflict(findings, threats, rows, trust)
     rows += operator_rows(gates, rows, nodes, root)
-    return {"zones": zones, "access": rows, "crossing": crossing, "bypasses": bypasses, "gates": gates, "threats": threats, "effective_zones": list(effective.values())}
+    # The sensitive data the answer names, each with its way (dataflow.js): only the steps at a card of the picture; a
+    # kind outside the list is "other", a sink outside it none; an entry without a step on the picture drops out.
+    # Empty texts stay empty: "not stated" is what the page says then, never a guess here.
+    data = []
+    for d in answer.get("data") or []:
+        if not isinstance(d, dict) or not str(d.get("name") or "").strip():
+            continue
+        steps = [{"node": s["node"], "at": str(s.get("at") or ""), **({"sink": s["sink"]} if s.get("sink") in SINKS else {}),
+                  "protected": str(s.get("protected") or "").strip(), "retention": str(s.get("retention") or "").strip()}
+                 for s in d.get("steps") or [] if isinstance(s, dict) and s.get("node") in ids]
+        if steps and len(data) < 8:
+            data.append({"id": f"d{len(data) + 1}", "name": str(d["name"]).strip(), "kind": d.get("kind") if d.get("kind") in DATA_KINDS else "other", "steps": steps})
+    return {"zones": zones, "access": rows, "crossing": crossing, "bypasses": bypasses, "gates": gates, "threats": threats, "effective_zones": list(effective.values()), "data": data}
 
 
 # How exposed a place is: an access row by its own words (public and nothing checks: public; public behind a check:
 # authenticated; else internal_only), a call by the trust of its caller's zone.
-LEVEL_OF_TRUST = {"public": "public", "authenticated": "authenticated", "internal": "internal_only", "data": "internal_only"}
+LEVEL_OF_TRUST = {"public": "public", "operator": "internal_only", "authenticated": "authenticated", "internal": "internal_only", "data": "internal_only"}
 
 
 def reach_conflict(findings, threats, rows, trust):
@@ -453,6 +568,32 @@ def reach_conflict(findings, threats, rows, trust):
 
 
 SETTING = re.compile(r"\b[A-Z][A-Z0-9]*_[A-Z0-9_]{2,}\b")  # FRONT_DESK_TOKEN
+SUBJECT = re.compile(r"^\s*(?:the |a |an )?(.{3,60}?)\s+(?:is|are|was|has|have|must|stays?|exists?)\b", re.I)  # "the webhook secret is set …"
+ACCOUNT = re.compile(r"account|subscription|tenant|organi[sz]ation", re.I)  # a frame that is a cloud account
+DENIES = re.compile(r"^\s*(deny|denies|block|blocks)\b", re.I)
+LOOSENED = ("narrowed", "removed")  # what a PR does to a guard that makes it a finding candidate
+DEFECT = re.compile(r"not an attacker('s)? goal|no attacker|not exploitable|no abuse path|no abuse", re.I)  # as pr.js isDefect: a defect named as a threat
+
+
+def guard_node(row, nodes, access):
+    """The picture node a guard without one protects: the node whose name (its label before a bracket, or its id) the
+    guard's resource contains ("LoanEventsPolicy" protects "LoanEvents (SQS)"), else the one node the grants of the
+    same kind sit at (the queue every "queue" row names). None when neither says."""
+    key = lambda s: re.sub(r"[^a-z0-9]+", "", str(s or "").split("(")[0].lower())  # noqa: E731
+    res = key(row.get("resource"))
+    named = [n.get("id") for n in nodes if len(key(n.get("label") or n.get("id"))) >= 4 and key(n.get("label") or n.get("id")) in res]
+    if len(named) == 1:
+        return named[0]
+    ids = {n.get("id") for n in nodes}
+    same = {r.get("node") for r in access if isinstance(r, dict) and r is not row and not is_guard(r) and r.get("kind") and r.get("kind") == row.get("kind") and r.get("node") in ids}
+    return same.pop() if len(same) == 1 else None
+
+
+def is_guard(row):
+    """A rule that takes a right away or narrows it (effect deny; a run from before the field wrote "deny …" as its
+    actions): a guard at its resource, not a grant."""
+    actions = [str(a) for a in row.get("actions") or []]
+    return row.get("effect") == "deny" or (bool(actions) and all(DENIES.match(a) for a in actions))
 CONFIGISH = re.compile(r"environment|env var|config|secret|parameter|setting|deploy", re.I)
 CONFIG_FILES = re.compile(r"\.(ya?ml|json|toml|tf|tfvars|env|ini|cfg|conf)$|(^|/)\.env[^/]*$|Dockerfile", re.I)
 
@@ -489,11 +630,20 @@ def operator_rows(gates, rows, nodes, root):
             continue
         w = g["where"]
         node = next((r.get("node") for r in rows if r["id"] == w.get("access")), None) if w.get("access") else w.get("to")
-        for name in names or ["configuration"]:
+        # Without a NAME_LIKE_THIS the condition's own subject names it ("the webhook secret is set and not empty").
+        subject = SUBJECT.match(text)
+        for name in names or [subject[1].strip() if subject else "configuration"]:
             src = value_from(root, name) if names else None
+            same = next((o for o in out if o.get("node") == node and not names and o["value_from"] is None and not SETTING.search(o["resource"])), None)
+            if same:  # two checks of one card that hold on unnamed settings: one operator way, both named
+                if name not in same["resource"].split("; "):
+                    same["resource"] += f"; {name}"
+                    same["actions"].append(f"set {name}")
+                same["from_gates"].append(k)
+                continue
             out.append({"id": f"acc{len(rows) + len(out) + 1}", "resource": name, "kind": "configuration", "principal": f"operator who deploys {label.get(node, node or 'it')}",
                         "principal_kind": "operator", "principal_node": None, "change": "unchanged", "actions": [f"set {name}"], "public": False, "auth": "deploy access",
-                        "auth_kind": "iam", "at": src or g.get("at") or "", **({"node": node} if node else {}), "derived": True, "from_gate": k, "value_from": src})
+                        "auth_kind": "iam", "at": src or g.get("at") or "", **({"node": node} if node else {}), "derived": True, "from_gate": k, "from_gates": [k], "value_from": src})
     return out
 
 
@@ -585,15 +735,60 @@ def claude_review(req, command=None):
     return answer, meta
 
 
+# ---- Codex: what its run may do. Codex's own "read-only" sandbox blocks writes and the network but reads the whole
+# disk (the home folder, Codex's login file), and a session loads the user's MCP servers and hooks and, in a trusted
+# clone, the PR's own .codex/config.toml (an MCP server from it is a command that runs outside every sandbox). So:
+# - a permission profile instead of sandbox_mode: the system's own files (Codex's `:minimal`), the tools' folders,
+#   the checkout and its clone's .git; nothing else is readable, nothing is writable, commands have no network;
+# - --ignore-user-config: no MCP servers and, since the trust of a folder lives there, no config from the PR;
+#   --ignore-rules, hooks, plugins and apps (the account's connectors) off, no web search;
+# - the model's commands get a core environment (no key or token of Codex's own) and git without the user's config;
+# - --strict-config: a Codex that does not know one of these settings fails instead of running without it.
+# Checked against Codex 0.164 without a model run: `codex sandbox` with this profile, and a session start against a
+# provider that does not answer (test_reviewers.py runs the first). The npm layout was only modelled, not installed.
+# ponytail: a Codex set up in config.toml (another provider, the login in the keyring) or installed in a layout not
+# known here fails with Codex's own error; pass those settings as -c overrides when someone needs that.
+CODEX_TOOLS = ("/opt/homebrew", "/usr/local")  # git and rg outside the system folders
+CODEX_SHELL_ENV = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_COUNT": "1",
+                   "GIT_CONFIG_KEY_0": "core.attributesFile", "GIT_CONFIG_VALUE_0": "/dev/null"}
+
+
+def toml(d):
+    """A dict of strings and dicts as a TOML inline table (a JSON string is a TOML string)."""
+    return "{" + ",".join(f"{json.dumps(k)}={json.dumps(v) if isinstance(v, str) else toml(v)}" for k, v in d.items()) + "}"
+
+
+def codex_reads(worktree, codex):
+    """What a Codex run may read besides the system's own files: the checkout, its clone's .git (a worktree keeps its
+    history there), the tools' folders, the codex program itself (installed with npm: its packages' folder) and, on
+    macOS, the cache that tells /usr/bin/git where the real git is (without it every git call takes seconds). Real
+    paths, only those that exist."""
+    common = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=worktree, capture_output=True, text=True).stdout.strip()
+    xcrun = os.path.join(os.confstr(65537), "xcrun_db") if sys.platform == "darwin" else ""  # 65537: _CS_DARWIN_USER_TEMP_DIR
+    parts = pathlib.Path(os.path.realpath(codex)).parts  # installed with npm: the launcher starts a binary of a package beside it
+    npm = str(pathlib.Path(*parts[:parts.index("node_modules") + 2])) if "node_modules" in parts[:-2] else ""
+    return [os.path.realpath(p) for p in (worktree, common, *CODEX_TOOLS, codex, npm, xcrun) if p and os.path.exists(p)]
+
+
+def codex_args(req, codex):
+    """The argv of the Codex run. codex by its real path: its sandbox starts the same program again and could not
+    read a link in the home folder."""
+    codex = os.path.realpath(codex)
+    files = {":minimal": "read", ":slash_tmp": "none", **{p: "read" for p in codex_reads(req["worktree"], codex)}}
+    pick = ["-c", f"model={json.dumps(req['codexModel'])}"] if req.get("codexModel") else []  # else Codex's own default
+    return [codex, "exec", "review", "--base", f"origin/{req['base']}", "--ignore-user-config", "--ignore-rules", "--strict-config",
+            "--disable", "hooks", "--disable", "plugins", "--disable", "apps", "-c", 'approval_policy="never"', "-c", 'web_search="disabled"',
+            "-c", 'default_permissions="review"', "-c", f"permissions.review.filesystem={toml(files)}",
+            "-c", f"shell_environment_policy={toml({'inherit': 'core', 'set': CODEX_SHELL_ENV})}", *pick]
+
+
 def codex_review(req):
     started = time.monotonic()
     codex = shutil.which("codex")
     if not codex:
         raise RuntimeError("codex is not installed (optional): see Setup")
-    pick = ["-c", f"model={json.dumps(req['codexModel'])}"] if req.get("codexModel") else []  # else Codex's own default
-    r = subprocess.run([codex, "review", "--base", f"origin/{req['base']}",
-                        "-c", 'sandbox_mode="read-only"', "-c", 'approval_policy="never"', *pick],
-                       cwd=req["worktree"], capture_output=True, text=True, timeout=TIMEOUT, env=llm.env_for(None))
+    r = subprocess.run(codex_args(req, codex), cwd=req["worktree"], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=TIMEOUT,
+                       env=llm.env_for(None, llm.CODEX_LOGIN))
     ms = int((time.monotonic() - started) * 1000)
     text = (r.stdout or "") + ("\n" + r.stderr if r.returncode != 0 else "")
     used = re.search(r"tokens used[:\s]*([\d,.]+)", text, re.I)
@@ -601,7 +796,7 @@ def codex_review(req):
     llm.log(FEATURE["codex"], (req.get("context") or {}).get("id") or "default", "codex", 0, tokens, ms, r.returncode == 0, tool="codex")  # Codex reports no price
     if r.returncode != 0:
         raise RuntimeError(f"codex review: {(r.stderr or r.stdout).strip()[-300:]}")
-    meta = {"ms": ms, "tokens": tokens}
+    meta = {"ms": ms, "tokens": tokens, "model_id": req.get("codexModel") or "codex", "converted": True}  # from_text keeps a model already named
     return from_text(text, req, meta), meta
 
 
@@ -647,11 +842,12 @@ def main(arg):
                                 **resilience.view(answer, findings, pic, [f["id"] for f in known], changed)}
         findings += resilience.complexity_findings(blocks["resilience"]["additions"])  # an unjustified part becomes a finding, never a blocker
     if req["kind"] == "security":
-        security = {"head": req["head"], "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "picture": made, **security_view(answer, findings, pic, changed, wt)}
+        security = {"head": req["head"], "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "picture": made, "rules": RULES, **security_view(answer, findings, pic, changed, wt)}
     for f in findings:
         f.pop("ref", None)
     notes = [f"/{'code-review' if req['kind'] == 'claude' else 'security-review'} not available: ran as a plain prompt"] if meta.get("fallback") else []
     notes += ["The reviewer answered in text: a Haiku pass turned it into findings"] if meta.get("converted") else []
+    notes += ["Codex reports no scope of its own"] if req["kind"] == "codex" else []
     run = {"state": "done", "cost": meta.get("cost"), "ms": int((time.monotonic() - started) * 1000), "model": meta.get("model_id"),
            "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "count": len(findings), "head": req["head"], "scope": scope(answer.get("scope"), req["kind"]),
            **({"note": ". ".join(notes)} if notes else {}), **({"auto": req["auto"]} if req.get("auto") else {}), "allowed": allowed(req)}
@@ -668,6 +864,6 @@ if __name__ == "__main__":
     try:
         main(sys.argv[1])
     except Exception as e:  # noqa: BLE001 - the panel shows the reason
-        merge(pathlib.Path(req["file"]), req["kind"], req["head"], None, {"state": "failed", "error": str(e)[:400], "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "head": req["head"], "allowed": allowed(req), **auto})
+        merge(pathlib.Path(req["file"]), req["kind"], req["head"], None, {"state": "failed", **llm.failed(e, 400), "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "head": req["head"], "allowed": allowed(req), **auto})
         print(str(e), file=sys.stderr)
         sys.exit(1)

@@ -1,8 +1,8 @@
 {
   "name": "chatbar",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "requires": {
-    "herdr-app": ">=0.1.14"
+    "herdr-app": ">=0.1.16"
   },
   "provides": {
     "chatbar-api": 1

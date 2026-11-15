@@ -61,4 +61,36 @@ for args in (["diff", str(top / "outside.txt"), "a.py"], ["diff", "../outside.tx
 assert call(str(repo), "log", "--oneline").stdout.strip().endswith("one")
 assert call(str(repo), "show", "HEAD:a.py").stdout == "x = 1\n"
 assert call("repo", "log").returncode == 2 and call(str(repo / "nowhere"), "log").returncode == 2, "the checkout is an absolute, existing folder"
+
+# regular-file: what an editor may open for a PR that is not trusted. One tracked regular file passes, as the path the
+# disk has; a folder, a symlink, a submodule, an untracked file, a pattern and a path out of the checkout do not.
+import os  # noqa: E402
+real = os.path.realpath(repo)
+(repo / "src").mkdir(); (repo / "src" / "only.py").write_text("y = 1\n"); (repo / "sp ace").mkdir(); (repo / "sp ace" / "ä b.txt").write_text("z\n")
+os.symlink("/etc/hosts", repo / "link"); os.symlink("/etc", repo / "dirlink"); (repo / "untracked.txt").write_text("u\n")
+run("add", "src", "sp ace", "link", "dirlink")
+run("update-index", "--add", "--cacheinfo", f"160000,{run('rev-parse', 'HEAD').stdout.strip()},vendor/lib")
+is_file = lambda rel: call(str(repo), "regular-file", rel)  # noqa: E731
+for rel in ("a.py", "src/only.py", "sp ace/ä b.txt", "./src/only.py"):
+    out = is_file(rel)
+    assert out.returncode == 0 and out.stdout == os.path.join(real, os.path.normpath(rel)), (rel, out.stdout, out.stderr)
+for rel in ("src", "src/", "link", "dirlink", "dirlink/hosts", "vendor/lib", "untracked.txt", "src/*.py", "*.py", "missing.py", "../outside.txt", str(top / "outside.txt"), ".", "a.py\nx"):
+    out = is_file(rel)
+    assert out.returncode == 1 and out.stdout == "", (rel, out.stdout)
+assert call(str(repo), "regular-file").returncode == 1 and call(str(repo), "regular-file", "a.py", "src/only.py").returncode == 1, "one path"
+# Two names of the PR that are one name on a disk that ignores case: `notes.md` a file, `NOTES.md` a symlink out of
+# the checkout. The index says "regular file" for notes.md whatever the disk holds; the disk decides. With the
+# symlink there (as that name on a disk that ignores case, as notes.md itself otherwise), nothing is opened; with the
+# file there, the file is.
+blob = lambda text: subprocess.run(["git", "hash-object", "-w", "--stdin"], cwd=repo, input=text, capture_output=True, text=True, check=True).stdout.strip()  # noqa: E731
+run("update-index", "--add", "--cacheinfo", f"100644,{blob('notes\n')},notes.md"); run("update-index", "--add", "--cacheinfo", f"120000,{blob('/etc/hosts')},NOTES.md")
+os.symlink("/etc/hosts", repo / "NOTES.md")
+if not (repo / "notes.md").is_symlink():  # a disk that tells the two names apart: the same state by the one name
+    os.symlink("/etc/hosts", repo / "notes.md")
+assert is_file("notes.md").returncode == 1 and is_file("NOTES.md").returncode == 1, "the index's regular file is a symlink on disk"
+for name in ("NOTES.md", "notes.md"):
+    if (repo / name).is_symlink():
+        os.unlink(repo / name)
+(repo / "notes.md").write_text("notes\n")
+assert is_file("notes.md").stdout == os.path.join(real, "notes.md")
 print("ok")

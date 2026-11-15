@@ -1,5 +1,6 @@
 // Run: node test_pr.mjs
 import assert from "node:assert/strict";
+import * as pr from "./pr.js"; // the newer tests name what they use
 import { diffRows, buildPrompt, nextChange, splitPatch, selection, lineLabel, anchorRow, buildReview, hunksOf, budget,
   mapReview, suspectComment, fileRows, fileTree, reviewRequest, stepKey, lowValue, lineKey, rangeOf, codeOf, isStale } from "./pr.js";
 
@@ -511,7 +512,7 @@ console.log("ok");
   assert.equal(taskHead(taskList([], [], [], statusOf)), "");
   const counts = { unresolved: 4, high: 2, medium: 2, low: 0, security: 1 };
   // Counted by what decides: security, criteria, blockers; not the high findings. Only security has a colour of its own.
-  assert.deepEqual(verdictParts(list, counts).map((p) => [p.text, p.short, p.tone]), [["1 security cause, high (reach assumed)", "⛨ 1 high", "security"], ["0 of 2 acceptance criteria met", "0/2 criteria", "plain"]]);
+  assert.deepEqual(verdictParts(list, counts).map((p) => [p.text, p.short, p.tone]), [["1 security cause, high (assumed reachable)", "⛨ 1 high", "security"], ["0 of 2 acceptance criteria met", "0/2 criteria", "plain"]]);
   assert.deepEqual(verdictParts(taskList(asks, [f("a", "high", { security: true }), f("b", "low", { security: true })], [], statusOf), { unresolved: 2, high: 1, low: 1, security: 2 })[0].text, "2 security causes, 1 high");
   assert.deepEqual(verdictParts(taskList([asks[2]], [], [], statusOf), { unresolved: 0, security: 0 }).map((p) => [p.text, p.tone]), [["1 of 1 criteria met", "ok"]]);
   assert.deepEqual(verdictParts(taskList([asks[3]], [f("a", "medium")], [], statusOf), { unresolved: 1, medium: 1, security: 0 }).map((p) => [p.text, p.tone]), [["1 unresolved finding", "plain"]], "no task, no security: the findings");
@@ -570,7 +571,7 @@ console.log("ok");
   // The copied state: a security finding with its title only (no file, no line, no facts), the others with their place.
   const text = reviewState({ pr: { repo: "o/r", number: 2, title: "feat: x", url: "https://example.test/pull/2" }, head: "abcdef1234", list, counts, findings: all, statusOf, progress: "1 of 9 files viewed" });
   assert.match(text, /^Review state of o\/r#2: feat: x\nhttps:\/\/example\.test\/pull\/2 at abcdef1\n/);
-  assert.match(text, /\n1 security cause, high \(reach assumed\) · 0 of 2 acceptance criteria met\n/);
+  assert.match(text, /\n1 security cause, high \(assumed reachable\) · 0 of 2 acceptance criteria met\n/);
   assert.match(text, /\n- broken: one \(acceptance criterion\). w1\n- partly: two \(acceptance criterion\). w2\n- met: three\n- extra: more\n/);
   assert.match(text, /\nUnresolved \(3\):\n- high, security: T s1\n- high: T f1 \(a\.py:3\)\n- medium: T f2 \(a\.py:3\)\n/);
   assert.match(text, /\nFix sent \(1\):\n- medium: T f3 \(a\.py:3\)\n/);
@@ -693,7 +694,10 @@ console.log("ok");
   assert.deepEqual(v.arch.nodes.map((n) => n.zone ?? null), ["z2", "z2", "z2", "z2", "z2", "z2", "z2", "z3"]);
   assert.deepEqual(v.arch.edges.map((e) => Boolean(e.crosses)), [false, false, false, false, true, true, false, false]);
   assert.deepEqual([v.access.map((r) => r.id), v.threats.map((t) => t.id), v.securityTrigger.run], [["acc1", "acc2"], ["t1"], true]);
-  assert.deepEqual(v.securityFrom, { source: "security", head, at: security.at, older: false, why: null });
+  assert.deepEqual(v.securityFrom, { source: "security", head, at: security.at, older: false, why: null, predates: true });
+  // A run made under the current rules says so; an older one gets the note that offers the re-run.
+  assert.equal(pr.secNote(v), "run predates the current security rules: re-run");
+  assert.equal(pr.secNote(pr.withSecurity(ai, { ...security, rules: pr.SEC_RULES }, null, head)), null);
   const s2 = withSecurity(ai, { ...security, gates: [{ where: { access: "acc1" }, check: "token", source: "code" }], effective_zones: [{ node: "handler", drawn: "authenticated", effective: "public" }] }, ctx, head);
   assert.deepEqual([s2.gates.length, s2.effectiveZones[0].effective, v.gates, v.effectiveZones], [1, "public", [], []], "gates and effective zones of the security run; an older block has none");
   assert.equal(ai.arch.zones, undefined, "the analysis itself is not changed");
@@ -983,6 +987,9 @@ console.log("ok");
   assert.deepEqual(dq.paths.map((p) => [p.id, p.blocker ? "block" : p.same_cause ?? "-"]), [["p1", "block"], ["p3", "block"], ["p2", "p1"]], "blockers first, the repeated cause after them");
   assert.equal(dq.counts.blockers, 2);
   assert.equal(blockerOf(P("p", "state", ["e5"], "finding", ["reads_foreign_state", "poison_message"]), null, null), null, "reading another process' state is a finding, its poison message blocks in its own path");
+  assert.deepEqual([blockerOf(P("p", "request", ["library/handler.py:21"], "finding", ["dishonest_response", "no_timeout_public", "no_throttle", "reads_foreign_state"]), null, null)?.why,
+    blockerOf(P("p", "request", ["library/handler.py:21"], "finding", ["reads_foreign_state", "lost_effect", "no_timeout_public"]), null, null)?.why, blockerOf(P("p", "state", ["a.py:1"], "finding", ["reads_foreign_state", "lost_effect"], { visible: false, kind: "effect" }), null, null)],
+  ["the route answers success while the work is lost", "a call without a timeout waits inside a public route's request", null], "the path's own reason wins over the foreign read; what the read breaks still blocks in its own path");
   assert.equal(blockerOf(P("p", "retry", ["e5"], "mitigated", ["no_dlq"], { limited_by: "a.py:1" }), ladderOf(p1, deps), null), null, "only a path with a finding blocks");
   assert.equal(blockerOf(P("p", "retry", ["queue", "e5", "consumer"], "finding", ["unbounded_retry"]), ladderOf(p1, deps), null).at, "library/consumer.py:14", "a path without a line blocks at its ladder's place");
   assert.deepEqual(blockerOf(P("p4", "request", ["e0", "library/mailer.py:14"], "finding", ["no_throttle", "swallowed_retry", "dishonest_response"]), null, null),
@@ -1033,6 +1040,30 @@ console.log("ok");
   assert.deepEqual([run5.counts.blockers, run5.paths.find((p) => p.id === "p2").triggers, run5.paths.find((p) => p.id === "p1").blocker?.why],
     [2, ["p2", "p3"], "a visible effect happens twice"], "a poison message and a batch over its timeout come back from one queue: one blocker; the double mail stays its own");
   assert.deepEqual([withResilience(mapReview({ steps: [] }, []), null).resilience, withResilience(mapReview({ steps: [] }, []), { paths: [] }).resilience.summary], [null, "The run found no path a failure takes through this change."]);
+  // Dependencies that fail or are overloaded: each with its card on the map (its node, else where its call leads), a
+  // case's path only when the run has it; the chosen path marks the dependency with the cases that break on it; what
+  // the code cannot tell is asked after the merge; one sentence counts the cases. A case alone blocks nothing.
+  {
+    const { downstreamOf } = await import("./pr.js");
+    const pic = { ...mapReview({ steps: [] }, []), arch: { nodes: [{ id: "handler" }, { id: "mailer" }, { id: "queue" }], edges: [{ from: "handler", to: "mailer" }, { from: "handler", to: "queue" }] } };
+    const downstream = [{ dep: "Mailer", kind: "external", node: null, edge: "e0", at: "library/mailer.py:14", mode: "sync", cases: [
+      { when: "slow", at: "library/mailer.py:16", handled: "no", how: "waits up to 7 s", path: "p1", findings: [] }, { when: "overloaded", at: "library/mailer.py:17", handled: "partly", how: "retries at once", path: "p1", findings: [] },
+      { when: "down", at: "library/mailer.py:19", handled: "no", how: "drops the mail", path: "p2", findings: [] }, { when: "slow", at: null, handled: "not_checkable", how: "", path: null, findings: [] }, { when: "bad_answer", at: null, handled: "not_checkable", how: "The provider's answer is not in the code.", path: null, findings: [] },
+      { when: "recovers", at: null, handled: "not_checkable", how: "", path: "p7", findings: [] }] },
+    { dep: "LoanEvents", kind: "queue", node: "queue", edge: "e1", at: "library/events.py:20", mode: "async", entry: "the publisher", cases: [{ when: "down", at: "library/events.py:20", handled: "yes", how: "raises", path: null, findings: [] },
+      { when: "slow", at: null, handled: "not_checkable", how: "no SQS call exists", path: null, findings: [] }, { when: "overloaded", at: null, handled: "not_checkable", how: "no SQS call exists", path: null, findings: [] }] }];
+    const dr = withResilience(pic, { edge_ids: true, downstream, paths: [P("p1", "request", ["handler", "e0"], "finding", ["no_backoff", "backpressure"], { findings: ["x"] }), P("p2", "request", ["handler"], "mitigated", [], { limited_by: "a.py:1" })] }).resilience;
+    assert.deepEqual(dr.downstream.map((d) => d.card), ["mailer", "queue"]);
+    assert.deepEqual(dr.downstream[0].cases.map((c) => c.path), ["p1", "p1", "p2", null, null, null], "a path the run does not have is no link");
+    assert.deepEqual(dr.paths.find((p) => p.id === "p1").marks.filter((m) => m.at === "mailer").map((m) => m.mark), ["✕ when slow", "~ when overloaded"]);
+    assert.deepEqual(dr.paths.find((p) => p.id === "p2").marks.filter((m) => m.at === "mailer").map((m) => m.mark), ["✕ when down"]);
+    assert.equal(dr.paths.find((p) => p.id === "p1").blocker, null, "retrying at once and a wait that backs up are findings, alone no blockers");
+    assert.equal(dr.downstreamLine, "2 dependencies, 9 cases: 2 not handled, 1 partly, 1 handled and 5 not checkable.");
+    assert.ok(dr.watch.includes("Mailer is slow, answers wrong or comes back (library/mailer.py:14): The provider's answer is not in the code"), JSON.stringify(dr.watch));
+    assert.ok(dr.watch.includes("LoanEvents, from the publisher, is slow or overloaded (library/events.py:20): no SQS call exists"), "per way in, the same reason once");
+    const none = withResilience(pic, { paths: [] }).resilience;
+    assert.deepEqual([none.downstream, none.downstreamLine, downstreamOf(null, null)], [[], "", []], "an older run has no dependencies: nothing is shown");
+  }
   // Before the run: what the diff adds, without a model (PR #2's template and handler).
   const files = splitPatch(["diff --git a/template.yaml b/template.yaml", "--- a/template.yaml", "+++ b/template.yaml", "@@ -0,0 +1,6 @@", "+  LoanEvents:", "+    Type: AWS::SQS::Queue",
     "+  FrontDesk:", "+    Type: AWS::Serverless::Function", "+        Type: HttpApi", "+    Type: AWS::Serverless::Function",
@@ -1073,4 +1104,104 @@ console.log("ok");
     { head: "h", zones: [{ id: "fd", trust: "authenticated", nodes: ["handler"] }, { id: "rc", trust: "internal", nodes: ["consumer", "queue"] }], crossing: [], access: [], threats: [], effective_zones: direct }, null, "h");
   assert.deepEqual(ai.effectiveZones.map((z) => [z.node, z.effective, z.via]), [["handler", "public", []], ["consumer", "public", ["e0"]], ["mailer", "public", ["e0", "e1"]]], "withSecurity gives the passed-on zones");
   console.log("ok effective zones");
+}
+
+// One count of security findings: a finding a named threat with result "finding" stands on is ⛨ whatever its effect
+// (a flood is about availability and still an attack); the reviewers' findings get their threats from the security
+// view when the run did not write them; a defect named as a threat and a placeholder do not count. A zone of
+// operator scripts only is the operator's zone in an older run too.
+{
+  const flood = { id: "f1", reviewer: "security", file: "t.tf", line: 3, severity: "medium", category: "availability", impact: "degraded_operation", title: "One limit for everyone", detail: "" };
+  const bug = { id: "f2", reviewer: "security", file: "s.sh", line: 9, severity: "medium", category: "bug", impact: "edge_case", title: "The loop never ends", detail: "" };
+  const plain = { id: "f3", reviewer: "claude", file: "a.py", line: 1, severity: "high", category: "bug", impact: "dead_path", title: "Never called", detail: "" };
+  const sec = { zones: [{ id: "z1", trust: "public", nodes: ["gw"] }, { id: "z2", trust: "authenticated", nodes: ["tool"] }], access: [{ id: "acc1", principal_kind: "operator", node: "tool" }],
+    threats: [{ id: "t1", where: { access: "acc0" }, result: "finding", findings: ["f1"] }, { id: "t2", where: { access: "acc1" }, result: "finding", findings: ["f2"], goal: "Not an attacker goal." },
+      { id: "t3", where: { access: "acc1" }, result: "not_assessed", findings: [], derived: true }] };
+  assert.equal(pr.isSecurity(flood), false, "by itself a flood is about availability");
+  const list = pr.withThreats([flood, bug, plain], sec);
+  assert.deepEqual(list.map((f) => [f.id, f.threats ?? null, pr.isSecurity(f)]), [["f1", ["t1"], true], ["f2", null, false], ["f3", null, false]]);
+  assert.equal(pr.withThreats(list, sec), list, "nothing to add: the same array");
+  // The ⛨'s help text says which kind; what follows from ⛨ (title only in the copied state) follows from the effect.
+  assert.deepEqual([pr.secWhy(list[0]), pr.secWhy({ ...list[0], impact: "unauthorized_access" }), pr.secWhy({ security: true, impact: "data_exposure" }), pr.secWhy(list[2])],
+    ["Security: named by a threat (t1).", "Security: access or data; also named by a threat (t1).", "Security: access or data.", ""]);
+  assert.deepEqual([pr.secByEffect(list[0]), pr.secByEffect({ ...list[0], impact: "unauthorized_access" }), pr.secByEffect({ security: true })], [false, true, true], "⛨ through a threat alone is not security by effect");
+  const merged = pr.mergeFindings(list).findings, counts = pr.findingCounts(merged, () => "open");
+  assert.deepEqual([merged.find((f) => f.id === "f1").security, merged.find((f) => f.id === "f1").threats, counts.security], [true, ["t1"], 1], "the chip, the navigation and the verdict count it");
+  const v = pr.withSecurity({ arch: { nodes: [{ id: "gw" }, { id: "tool" }], edges: [] }, access: [] }, sec);
+  assert.deepEqual(v.arch.zones.map((z) => z.trust), ["public", "operator"], "an admin workstation is the operator's zone, not authenticated or public");
+  console.log("ok one count of security findings");
+}
+
+// Acceptance, engineer 1: a security run under older rules. The ⛨ count says so in the verdict line and in the bar, and
+// the re-run sentence names how many security causes hang only on a threat that run named.
+{
+  const { verdictParts, taskList, secOldLine, reviewState } = await import("./pr.js");
+  const f = (id, extra = {}) => ({ id, ids: [id], file: "a.py", line: 1, severity: "high", title: id, ...extra });
+  const token = f("token", { security: true, impact: "unauthorized_access" }), flood = f("flood", { security: true, impact: "degraded_operation", threats: ["t2"] }), dlq = f("dlq", { security: true, impact: "data_loss", category: "availability", threats: ["t4"], severity: "medium" });
+  const list = taskList([], [token, flood, dlq], [], () => "open"), c = { unresolved: 3, security: 3 };
+  assert.deepEqual(verdictParts(list, c, { oldRules: true }).map((p) => [p.text, p.short]), [["3 security causes, 2 high (older rules, re-run)", "⛨ 2 high (older rules, re-run)"]]);
+  assert.deepEqual(verdictParts(list, c).map((p) => [p.text, p.short]), [["3 security causes, 2 high", "⛨ 2 high"]], "a current run: no note");
+  const one = taskList([], [{ ...flood, path_certainty: "assumed" }], [], () => "open");
+  assert.deepEqual(verdictParts(one, c, { oldRules: true }).map((p) => [p.text, p.short]), [["1 security cause, high (assumed reachable; older rules, re-run)", "⛨ 1 high (older rules, re-run)"]]);
+  assert.equal(verdictParts(taskList([], [f("x")], [], () => "open"), { unresolved: 1 }, { oldRules: true })[0].text, "1 unresolved finding", "no ⛨ count, no note");
+  const old = { securityFrom: { predates: true } };
+  assert.ok(secOldLine(old, list.security).endsWith("Re-run it for the current view. 2 of the 3 security causes carry ⛨ only through a threat this run named, so the count may change."), secOldLine(old, list.security));
+  assert.ok(secOldLine(old, [flood]).endsWith(" 1 of the 1 security cause carries ⛨ only through a threat this run named, so the count may change."));
+  assert.ok(secOldLine(old, [token]).endsWith(" None of the one security cause hangs on a threat of this run.") && secOldLine(old, []).endsWith("current view."));
+  assert.equal(secOldLine({ securityFrom: { predates: false } }, list.security), null); assert.equal(secOldLine(null, list.security), null);
+  assert.ok(reviewState({ pr: { number: 2 }, list, counts: c, findings: [], statusOf: () => "open", oldRules: true }).includes("(older rules, re-run)"));
+  console.log("ok a security run under older rules");
+}
+
+// Acceptance, engineer 4: the panel's marks and the review's have one source. A finding a threat of the security run
+// stands on is ⛨ in the panel's file list too (knownOf applies withThreats, as the review's load does).
+{
+  const { knownOf, isSecurity, mergeFindings, withThreats } = await import("./pr.js");
+  const { fileRisk, riskSignal, rowMarks } = await import("./views.js");
+  const fd = { findings: [{ id: "c1", reviewer: "claude", file: "library/consumer.py", line: 13, severity: "high", impact: "degraded_operation", category: "availability", title: "One failing record retries the whole batch" },
+    { id: "e1", reviewer: "claude", file: "library/events.py", line: 19, severity: "high", impact: "dead_path", category: "bug", title: "Queue.publish only appends to a list" },
+    { id: "m1", reviewer: "claude", file: "library/mailer.py", line: 13, severity: "high", impact: "degraded_operation", category: "availability", title: "Mailer swallows exhausted retries" }],
+    status: {}, security: { threats: [{ id: "t4", result: "finding", findings: ["c1"] }, { id: "t5", result: "finding", findings: ["e1"] }, { id: "t6", result: "mitigated", findings: ["m1"] }] } };
+  const known = knownOf(null, fd), marks = fileRisk(known), panel = (path) => rowMarks(marks.get(path), null)[0].text;
+  assert.deepEqual([panel("library/consumer.py"), panel("library/events.py"), panel("library/mailer.py")], ["⛨ high", "⛨ high", "high"]);
+  assert.deepEqual(rowMarks(fileRisk({ findings: fd.findings, status: {} }).get("library/consumer.py"), null)[0].text, "high", "without the threats the mark was missing: the error of the acceptance");
+  // The review's own: the merged findings of the same file carry the same sign.
+  const merged = mergeFindings(withThreats(fd.findings, fd.security)).findings;
+  for (const f of merged) assert.equal(Boolean(f.security), Boolean(marks.get(f.file).security), `${f.file}: the panel and the review agree`);
+  assert.ok(riskSignal(known).security && known.findings.filter(isSecurity).length === 2 && known.analysis === null);
+  assert.deepEqual(knownOf(null, null), { analysis: null, findings: null, status: null }); assert.equal(riskSignal(knownOf(null, null)), null);
+  console.log("ok the panel's marks are the review's");
+}
+
+// Acceptance, engineer (merging): one effect said in each source's own sentence, at ranges at most 3 lines apart, is one
+// finding, also when the titles are worded apart and the impact classes differ (PR #2, reminders.py:21-23, the double
+// mail in three wordings). What says another effect stays apart, as does the same effect further away or in another
+// file, and two findings about different named resources.
+{
+  const { mergeFindings, sameDefect, sameCause } = await import("./pr.js");
+  const F = (id, reviewer, line, end, severity, impact, title, effect, extra = {}) => ({ id, reviewer, file: "library/reminders.py", line, end, severity, category: "bug", impact, title, effect, detail: "", suggestion: "", ...extra });
+  const sec = F("s", "security", 21, 23, "medium", "edge_case", "send_reminders mails directly and also publishes an event the consumer mails again", "Members get two identical reminder mails per loan.");
+  const ana = F("a", "analysis", 21, 21, "high", "breaks_requirement", "Reminder is mailed here and again by the consumer", "Members get two reminder mails per loan, not one.");
+  const cl23 = F("c23", "claude", 23, 23, "high", "breaks_requirement", "Reminder mailed twice: directly and again by the consumer", "Each member gets two reminder emails per due loan.");
+  const atom = F("c22", "claude", 22, 22, "medium", "degraded_operation", "Mail is sent before the state change and event, with no atomicity", "Duplicate mails, or a loan marked reminded without an event or mail.");
+  const at = (f) => `${f.line}-${f.end} ${f.severity} ${f.ids.join("+")}`;
+  assert.deepEqual(mergeFindings([sec, ana, atom, cl23]).findings.map(at), ["21-23 high s+a+c23", "22-22 medium c22"], "the double mail once, with its three sources; the other statement apart");
+  assert.deepEqual(mergeFindings([sec, ana, cl23]).findings[0].sources.map((x) => `${x.reviewer} ${x.severity}`), ["security medium", "analysis high", "claude high"]);
+  assert.equal(mergeFindings([{ ...sec, effect: "" }, { ...ana, effect: "" }]).findings.length, 2, "without the effect sentences the titles decide, as before");
+  assert.equal(sameDefect(sec, atom), false, "another effect, another impact: two findings");
+  assert.equal(mergeFindings([{ ...sec, end: 21 }, { ...ana, line: 25, end: 25 }]).findings.length, 2, "the same effect four lines away is another place");
+  assert.equal(mergeFindings([sec, { ...ana, file: "library/consumer.py" }]).findings.length, 2, "another file never joins");
+  assert.equal(sameDefect({ ...sec, title: "MAIL_FROM is not set" }, { ...ana, title: "SMTP_HOST is not set" }), false, "two titles about different named resources are never one, whatever the effect");
+  // The impact rule of wave C2 is as it was: the statement about atomicity, when its impact class is the security
+  // finding's, joins through that source (on PR #2 it was a source of the security review's entry before, too).
+  assert.deepEqual(mergeFindings([sec, ana, { ...atom, impact: "edge_case" }, cl23]).findings.map(at), ["21-23 high s+a+c22+c23"]);
+  // Across files there is no such rule: the same effect has different causes (acceptance: api.py:15 and status.py:39
+  // stay two findings without a "same cause"; their titles score 0.27, under the 0.35 that tells one claim, their
+  // effects 0.14, and neither text names the other's file).
+  const api = { id: "api", file: "library/api.py", line: 15, impact: "breaks_requirement", title: "give_back still changes status outside transition", effect: "Returned loans publish no event, and status changes happen in several places.", detail: "`api.give_back` calls `LoanStore.give_back`, which writes `returned_on` directly." };
+  const st = { id: "st", file: "library/status.py", line: 39, impact: "breaks_requirement", title: "transition is not the only place status changes; loan.returned is never published", effect: "Returns publish no event and are not checked against the state machine.", detail: "LoanStore.give_back (loans.py:41) and api.give_back set returned_on directly." };
+  assert.equal(sameCause(api, st), false);
+  const same = { ...st, effect: api.effect };
+  assert.equal(sameCause(api, same), false, "the same effect sentence in two files is not one cause by itself");
+  console.log("ok one effect near by is one finding");
 }

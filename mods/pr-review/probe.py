@@ -25,9 +25,11 @@ reads from the script, never from what it prints (strength_of): models_env when 
 On the base the outcome is one of four (base_verdict): already_on_base (reproduced there too), new_in_pr (the code it
 tests is not there: ImportError or AttributeError), unknown (a signature that does not fit: TypeError, or the script
 failed otherwise), not_on_base.
-The result is printed as JSON and written to <checkout>/.pr-review-probe/<id>.result.json (only by this runner):
+The script is read once, without following a link (a link, a folder that is a link, anything but a plain file of at
+most 64 KB is refused), and the result is printed as JSON, nothing is written into the checkout:
 {id, status, strength, line, exit, ms, head, base: {rev, status, line, exit, ms, verdict} | null, pre_existing,
-network_barrier, sandbox, output, at}. Exit 2 when the call is refused. Standard library only.
+network_barrier, sandbox, output, at, script (what ran, blacked out like the output)}. The review takes script and
+result from this output only. Exit 2 when the call is refused, 3 when there is no script. Standard library only.
 """
 import ast
 import datetime as dt
@@ -38,6 +40,7 @@ import platform
 import pwd
 import re
 import shutil
+import stat
 import struct
 import subprocess
 import sys
@@ -50,7 +53,7 @@ import time
 PROBE_DIR = ".pr-review-probe"
 ID = re.compile(r"[A-Za-z0-9_-]{1,40}")  # as threads.js PROBE_ID and resilience.py PROBE_ID
 REV = re.compile(r"[A-Za-z0-9][A-Za-z0-9_./^~-]{0,199}")
-LIMIT_S, OUT_CAP, READ_CAP = 30, 4096, 65536
+LIMIT_S, OUT_CAP, READ_CAP, SCRIPT_CAP = 30, 4096, 65536, 64000
 STRENGTHS = ("runs_pr_code", "forced_schedule", "models_env")
 VERDICT = re.compile(r"^\s*(reproduced|not_reproduced|refuted)\b[\s:]*(.*)$")
 # What is blacked out of an output before anyone sees it: e-mail addresses and the usual token shapes.
@@ -59,6 +62,10 @@ SECRETS = [re.compile(p) for p in (
     r"\bsk-[A-Za-z0-9_-]{20,}", r"\bxox[abposr]-[A-Za-z0-9-]{10,}", r"(?i)\bbearer\s+[A-Za-z0-9._~+/-]{10,}=*",
     r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)",
     r"(?i)\b(?:secret|token|password|passwd|api[_-]?key)\b(\s*[=:]\s*)\S+")]
+
+
+class NoScript(ValueError):
+    """The agent wrote no script: no refusal of something that is there (exit 3, not 2)."""
 
 
 def redact(text):
@@ -324,10 +331,19 @@ def probe(checkout, pid, base=None, limit=LIMIT_S):
     if os.path.islink(folder) or os.path.realpath(folder) != os.path.join(checkout, PROBE_DIR):
         raise ValueError(f"{PROBE_DIR} must be a plain folder in the checkout")
     script = os.path.join(folder, f"{pid}.py")
-    if os.path.islink(script) or not os.path.isfile(script):
+    if not os.path.lexists(script):
+        raise NoScript(f"{PROBE_DIR}/{pid}.py is not there")
+    try:  # opened without following a link, and what was opened is checked: nothing can be swapped in between
+        fd = os.open(script, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        raise ValueError(f"{PROBE_DIR}/{pid}.py must be a plain file") from None
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
         raise ValueError(f"{PROBE_DIR}/{pid}.py must be a plain file")
-    with open(script, "rb") as f:
-        code = f.read()
+    with os.fdopen(fd, "rb") as f:
+        code = f.read(SCRIPT_CAP + 1)
+    if len(code) > SCRIPT_CAP:
+        raise ValueError(f"{PROBE_DIR}/{pid}.py is larger than {SCRIPT_CAP // 1000} KB")
     head = commit_of(checkout, "HEAD")
     base_sha = commit_of(checkout, base) if base else None
     if not head or (base and not base_sha):
@@ -355,11 +371,8 @@ def probe(checkout, pid, base=None, limit=LIMIT_S):
     out = {"id": pid, **{k: r[k] for k in ("status", "line", "exit", "ms")}, "strength": strength_of(code.decode("utf-8", "replace")), "head": head,
            "base": {"rev": base_sha, **{k: b[k] for k in ("status", "line", "exit", "ms")}, "verdict": verdict} if b else None,
            "pre_existing": verdict == "already_on_base" and r["status"] == "reproduced",
-           "network_barrier": how != "none", "sandbox": how, "output": r["output"], "at": dt.datetime.now().astimezone().isoformat(timespec="seconds")}
-    # Next to the script, for the review; never through a link (the folder is the agent's).
-    fd = os.open(os.path.join(folder, f"{pid}.result.json"), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o644)
-    with os.fdopen(fd, "w") as f:
-        json.dump(out, f)
+           "network_barrier": how != "none", "sandbox": how, "output": r["output"], "at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+           "script": redact(code.decode("utf-8", "replace"))}  # what ran, for the review: it reads no file of the agent's folder itself
     return out
 
 
@@ -383,14 +396,16 @@ def main(argv):
     limit = min(LIMIT_S, max(1, int(t))) if t.isdigit() else LIMIT_S
     try:
         print(json.dumps(probe(checkout, pid, base, limit), indent=1))
+    except NoScript as e:
+        return refuse(str(e), 3)
     except (ValueError, RuntimeError, OSError) as e:
         return refuse(str(e))
     return 0
 
 
-def refuse(why):
+def refuse(why, code=2):
     print(f"probe: refused: {why}", file=sys.stderr)
-    return 2
+    return code
 
 
 if __name__ == "__main__":

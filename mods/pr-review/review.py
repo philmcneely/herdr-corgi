@@ -197,7 +197,7 @@ def checked_schema(areas):
 # layer (no findings file); finish() gives it the id the UI uses and its severity; reviewer "analysis".
 FINDING = {"type": "object", "required": ["file", "line", "title", "detail", "suggestion", *JUDGED, "criteria"], "properties": {
     "file": S, "line": {"type": "integer"}, "end": {"type": "integer"}, **PROSE, **JUDGED,
-    "criteria": STRINGS, "breaks": {"type": "object", "properties": {"node": S, "from": S, "to": S}}, **PATH}}
+    "criteria": STRINGS, "breaks": {"type": "object", "properties": {"node": S, "from": S, "to": S, "transition": {"type": "object", "properties": {"from": S, "to": S}}}}, **PATH}}
 ASK_STATES = ["met", "partly", "broken", "not_done", "extra"]
 SCHEMA = {"type": "object", "required": ["title", "summary", "behavior", "merge_risk", "effort", "rule_checks", "architecture", "blast_radius", "steps", "asks",
                                         "components", "checked", "what_changed", "read"], "properties": {
@@ -417,7 +417,9 @@ def previous_digest(prev):
     return "\n".join([f"Title: {a.get('title', '')}", f"Summary: {a.get('summary', '')}",
                       *(f"- {s.get('title', '')}: {s.get('why_it_matters', '')}" for s in a.get("steps") or []),
                       "Requirements (for criteria): " + "; ".join(f"{x.get('id', '')}: {x.get('text', '')}" for x in a.get("asks") or [] if x.get("id")),
-                      "Architecture node ids (for breaks): " + ", ".join(str(n.get("id")) for n in (a.get("architecture") or {}).get("nodes") or [])])[:6000]
+                      "Architecture node ids (for breaks): " + ", ".join(str(n.get("id")) for n in (a.get("architecture") or {}).get("nodes") or []),
+                      *(f"State ids of the state diagram \"{v.get('title', '')}\" (for breaks.transition): " + ", ".join(str(n.get("id")) for n in v.get("nodes") or [])
+                        for v in state_diagrams(a))])[:6000]
 
 
 # The whole-PR parts next to the pictures (also in the merge pass of a big PR).
@@ -461,7 +463,9 @@ def prompt(hunks, cut, task_text, tools, rules="", candidates=(), previous=None,
             "criteria (the ids of the requirements in asks that this finding breaks; empty when it breaks none), breaks "
             "(where it breaks the flow on the architecture picture: node (the id of the node whose code is wrong), or from and to "
             "(the ends of the edge, when the call, event or data between two nodes is what fails or is missing); name it for every "
-            "finding whose code is a node or an edge of the picture, leave it out only when the picture has no such place); "
+            "finding whose code is a node or an edge of the picture, leave it out only when the picture has no such place; and "
+            "in the same breaks, next to node or from and to and never instead of them, transition for every finding about a "
+            "state machine: see the state diagram below); "
             "one finding per defect: report it once, in the layer and at the line of its cause, and say in detail where else "
             "it shows; two different defects are two findings, also when they sit in the same lines; a line that a finding "
             "already covers is not also a suggestion; "
@@ -483,7 +487,13 @@ def prompt(hunks, cut, task_text, tools, rules="", candidates=(), previous=None,
             "between them, back edges and self-transitions allowed; mark the transitions the PR adds or changes. This one is not "
             "optional: a layer whose diff adds or changes a status enum, a table of allowed moves or the function that applies them "
             "gets a state diagram with every state and every allowed move, and also each move the changed code attempts although "
-            "the table forbids it (changed, action: what happens then, e.g. \"raises ValueError\"). An orchestration: "
+            "the table forbids it (changed, action: what happens then, e.g. \"raises ValueError\"). Every finding of this "
+            "answer, in whichever layer, that says a status is set, moved, skipped or refused names that move of the diagram in "
+            "its breaks as transition {from, to} with the ids of the diagram's states, next to its place on the architecture "
+            "picture: code that sets the status or its fields itself instead of calling the function that applies moves names "
+            "the state it sets (to alone when it does so from any state, e.g. breaks {node: \"consumer\", transition {to: "
+            "\"reminded\"}}); a move that raises, is refused or leaves the entity half changed names that move (from and to); an "
+            "effect of a move that happens twice or never (a mail, an event) names the move it belongs to. An orchestration: "
             "pick it for a Step Functions or workflow definition; nodes are its states with type (task, choice, parallel, map, "
             "wait, pass, fail, succeed), states inside a Parallel or Map state have parent (its id) and branch (0, 1, …); "
             "transitions in execution order, a choice's ways labelled with their condition, Catch and Retry as transitions with "
@@ -754,18 +764,46 @@ def _reaches(runs, start, goal):
     return False
 
 
+def state_diagrams(answer):
+    """The state diagrams of an answer: the whole PR's and each layer's."""
+    return [v for holder in [answer, *(answer.get("steps") or [])] for v in holder.get("visuals") or [] if v.get("kind") == "state_machine"]
+
+
+def move_of(t, diagrams):
+    """The move of a state machine a finding names ({from, to}, one of them alone: every move out of or into that
+    state), as a state diagram draws it: the states' ids in the diagram's spelling (the model may write a state's
+    label or another case). None when no diagram has such a move.
+    ponytail: two diagrams with the same state names are not told apart; the first one that has the move wins."""
+    want = {k: str(t[k]).strip().lower() for k in ("from", "to") if isinstance(t, dict) and isinstance(t.get(k), str) and t[k].strip()}
+    for v in diagrams if want else []:
+        names = {str(n.get("id")): {str(n.get(k)).lower() for k in ("id", "label") if n.get(k)} for n in v.get("nodes") or []}
+        for e in [*(v.get("edges") or []), *(v.get("transitions") or [])]:
+            if all(w in names.get(str(e.get(k)), {str(e.get(k)).lower()}) for k, w in want.items()):
+                return {k: e[k] for k in want}
+    return None
+
+
 def place(answer):
-    """Each finding's place on the architecture picture checked against it: breaks {node} or {from, to, edge: the
-    UI's edge id e<k>}; a place the picture doesn't have is dropped. Also after a diagram refresh (new picture)."""
+    """Each finding's place on the pictures checked against them: breaks {node} or {from, to, edge: the UI's edge id
+    e<k>} on the architecture picture, and next to it or alone breaks.transition {from, to} on a state diagram
+    (move_of; also taken from a from and to that name states instead of cards); a place the pictures don't have is
+    dropped. Also after a diagram refresh (new pictures)."""
     arch = answer.get("architecture") or {}
     nodes = {n.get("id") for n in arch.get("nodes") or []}
     edges = {(e.get("from"), e.get("to")): f"e{k}" for k, e in reversed(list(enumerate(arch.get("edges") or [])))}
+    diagrams = state_diagrams(answer)
     for f in (f for st in answer.get("steps") or [] for f in st.get("findings") or []):
         b = f.pop("breaks", None) or {}
+        out = {}
         if b.get("node") in nodes:
-            f["breaks"] = {"node": b["node"]}
+            out = {"node": b["node"]}
         elif (b.get("from"), b.get("to")) in edges:
-            f["breaks"] = {"from": b["from"], "to": b["to"], "edge": edges[(b["from"], b["to"])]}
+            out = {"from": b["from"], "to": b["to"], "edge": edges[(b["from"], b["to"])]}
+        move = move_of(b.get("transition"), diagrams) or (None if "edge" in out else move_of(b, diagrams))
+        if move:
+            out["transition"] = move
+        if out:
+            f["breaks"] = out
     for row in answer.get("components") or []:
         if row.get("node") not in nodes:
             row.pop("node", None)
@@ -1253,6 +1291,6 @@ if __name__ == "__main__":
         print(json.dumps({"cost": r["cost"], "model": r["model_id"], "ms": r["ms"]}))
     except Exception as e:  # noqa: BLE001 - the panel shows the reason
         if status:
-            save(status, {"error": str(e)[:500]})
+            save(status, llm.failed(e))
         print(str(e), file=sys.stderr)
         sys.exit(1)

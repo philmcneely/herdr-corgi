@@ -99,7 +99,9 @@ All keys optional.
 
 - `language`: what the AI writes in (analysis, reviewer verdicts, fix checks) and asks your agent to answer in.
   Prompts are English either way. Default English.
-- `cloneRoot`: where clones go when no context says otherwise. Default `~/code`.
+- `cloneRoot`: where clones go when no context says otherwise. Default `~/code`; for example `"~/Work/Claude"`.
+  The checkouts made from a clone (the review's, a fix agent's) are not kept there but in Herdr's folder for
+  worktrees (`worktrees.directory` in Herdr's `settings.json`, default `~/.herdr/worktrees`).
 - `globalRules`: conventions every PR is checked against, next to the repo's own CLAUDE.md, AGENTS.md,
   CONTRIBUTING.md, `.github/*instructions*.md` and ADRs.
 - `ledger`: a folder for a usage ledger. Each LLM call appends one line to `usage-YYYY-MM.jsonl` there:
@@ -115,8 +117,11 @@ Feature names in the ledger: `Review analysis`, `Review analysis (since last rev
 Setup (PRs ▾ → Setup) checks each one and offers the install command; nothing is installed without you pressing
 Enter in the terminal it opens.
 
-- Required: `git`, `gh` (logged in), `claude` (logged in), `python3`.
-- Optional: `codex` (the Codex reviewer is offered only when it is on PATH), `acli` (the Jira ticket a PR names).
+- Required: `git` (2.46 or later for the push lock where a remote has a push URL of its own), `gh` (logged in),
+  `claude` (logged in), `python3`.
+- Optional: `codex` (the Codex reviewer is offered only when it is on PATH; it needs a Codex with permission
+  profiles), `bwrap` on Linux (the sandbox for probes; macOS has `sandbox-exec` built in), `acli` (the Jira ticket
+  a PR names).
 - The reviewers use Claude Code's `/security-review` and a `/code-review` command; when a command is missing in
   your Claude setup, the same review runs as a plain prompt.
 - Language servers, for go-to-definition and hover in the diff (each one only turns that language on):

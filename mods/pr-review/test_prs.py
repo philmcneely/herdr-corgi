@@ -41,6 +41,8 @@ assert prs.context_for(None, "https://github.com/x/bookshelf-thing", rules) == "
 assert prs.context_for(None, "https://github.com/x/y", [{"remote": "(", "context": "z"}]) is None  # a bad regex matches nothing
 # pr.js hash() in Python, for cache names.
 assert prs.fnv("") == "811c9dc5" and prs.fnv("a") == "e40c292c"
+# One unreadable PR is not an outage; every asked state unread is (the panel backs off on 3).
+assert [prs.exit_code(0, 5), prs.exit_code(2, 5), prs.exit_code(5, 5), prs.exit_code(0, 0)] == [0, 2, 3, 0]
 print("ok")
 
 # prune: a big diff's index and parts are one unit (counted once, dropped together)

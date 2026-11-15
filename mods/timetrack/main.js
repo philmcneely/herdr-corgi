@@ -3,13 +3,14 @@
 //   "float"  the same chip in a floating block;
 //   none     the popup the chip opens: timeline, edit form, Pause/Resume/Not work, Open Excel.
 // track.py (next to this file) is the tracker, a detached sampler. Every 10 s a chip reports what Herdr shows
-// (track.py --facts, which also starts it) and reads timetrack-data/status.json. track.py rewrites that file on
+// (herdr.json; through track.py --facts, which also starts it, until the sampler runs) and reads timetrack-data/status.json. track.py rewrites that file on
 // every sample and after every action; the popup redraws from it. The popup never takes the keyboard from the
 // terminal: its inputs only get focus when clicked.
 // Which Herdr contexts count as work comes from the goto.context hook and timetrack.contexts (PROVIDERS.md).
 import { View, div } from "gpui-kit";
 import { h_flex, v_flex, InputState, Input } from "gpui-base";
-import { theme, exec, appHome, readTextFile, watchFolder, props, openOverlay, shared, spaces, agents } from "herdr";
+import { theme, exec, appHome, readTextFile, writeTextFile, watchFolder, props, openOverlay, shared, spaces, agents, checking, setWindowTitle } from "herdr";
+import { samplerAlive, windowTitle } from "./chip.js";
 
 const DATA = () => `${appHome()}/timetrack-data`;
 const TRACK = () => `${appHome()}/mods/timetrack/track.py`;
@@ -20,6 +21,8 @@ const sod = (s) => `${pad(Math.floor(s / 3600))}:${pad(Math.floor(s / 60) % 60)}
 const EDIT = [["start", "Start", "07:30", sod], ["end", "End", "17:00", sod], ["breaks", "Breaks", "0:30", hm], ["note", "Note", "Free text", (v) => v]];
 const STATE = { tracking: "Tracking", paused: "Paused", off: "Not tracking" };
 const POPUP = { mod: "timetrack", kind: "popup", width: 340, height: 320 };
+// One window, one title: what the chips last set (null: Herdr's own), and how many chips live. Shared by the copies.
+const win = { title: null, chips: 0 };
 
 // What Herdr shows, for track.py: the shown space and the working agents, each with its context from the
 // goto.context hook (terminal, else space), plus which contexts count (timetrack.contexts).
@@ -43,21 +46,52 @@ export default class TimeTrack extends View {
     this.editing = false;
     // Inputs exist from the start but only take the keyboard when clicked: the popup never grabs focus.
     this.inputs = Object.fromEntries(EDIT.map(([f, , placeholder]) => [f, InputState.new({ placeholder })]));
+    if (checking()) return; // herdr-app check: nothing to watch
     cx.spawn(async (cx) => {
       for (;;) {
         try { this.s = JSON.parse((await readTextFile(`${DATA()}/status.json`)) ?? "null"); } catch {}
         cx.notify();
-        try { await watchFolder(DATA()); } catch { return; }
+        if (this.closed) return;
+        this.watch = watchFolder(DATA());
+        try { await this.watch; } catch { return; }
+        if (this.closed) return;
       }
     });
+  }
+
+  // The popup went: its watch on the data folder is given back (a cancelled watch resolves, and the loop ends).
+  // The last chip went: Herdr's own window title again.
+  async close() {
+    this.closed = true;
+    this.watch?.cancel();
+    if (this.counted && --win.chips === 0 && win.title !== null) { win.title = null; setWindowTitle(null); }
+  }
+
+  // The facts for track.py, every 10 s. While the sampler is alive the chip writes herdr.json itself: a process
+  // start per report is the mod's largest steady cost, and slow where every start is checked by security software.
+  // track.py --facts stays the way to start the sampler and to bring it back.
+  async report() {
+    const f = facts();
+    if (samplerAlive(this.s, Date.now())) {
+      const file = `${DATA()}/herdr.json`;
+      try { await writeTextFile(file, JSON.stringify({ ...f, at: Date.now() }), await readTextFile(file)); return; } catch { /* changed meanwhile: track.py writes it */ }
+    }
+    await exec("python3", [TRACK(), "--facts", JSON.stringify(f)]).catch(() => null);
   }
 
   // ponytail: polled with the facts (the chip lags a popup action by up to 10 s); cheap, and watchFolder from a
   // bar block didn't wake reliably.
   initChip(cx) {
+    // `herdr-app check` runs init for real: there the chip must not start the tracker or write herdr.json.
+    if (checking()) return;
+    win.chips++;
+    this.counted = true;
     const tick = (cx) => cx.spawn(async (cx) => {
-      await exec("python3", [TRACK(), "--facts", JSON.stringify(facts())]).catch(() => null);
+      await this.report();
       try { this.s = JSON.parse((await readTextFile(`${DATA()}/status.json`)) ?? "null"); } catch {}
+      // Setting window_title: the window is named after the tracked project. Set only when it changes, never in render.
+      const title = windowTitle(this.s, Date.now());
+      if (title !== win.title) { win.title = title; setWindowTitle(title); }
       const key = this.s ? `${this.s.state}|${hm(this.s.net)}|${Math.floor(this.s.at / 60)}` : "";
       if (key !== this.key) { this.key = key; cx.notify(); }
     });
