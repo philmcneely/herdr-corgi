@@ -1481,7 +1481,7 @@ export const ReviewMode = {
     this.previewFix(cx, { what: "Fix with agent", ownLabel: "SELECTED",
       own: [`COMMENTS · ${c.comments.length}`, ...c.labels, "", `FINDINGS · ${list.length}`, ...found].join("\n"),
       items: [...c.items, ...list.map((f) => ({ kind: "finding", id: f.id }))], labels: [...c.labels, ...found],
-      prompt: (sub) => TH.fixBothPrompt(c.prompt(sub, null), fixPrompt(list, this.pr, report, this.lang())),
+      prompt: (sub) => TH.fixBothPrompt(c.prompt(sub, null), fixPrompt(list, this.pr, report, this.lang())), foreign: c.foreign,
       sent: (cx, how) => { for (const f of list) this.setFinding(f, "progress", cx, { fixHead: this.headNow() }); c.sent(cx, how); } });
   },
   // The findings ticked in the Findings tab's "No fix sent". Only what can still be ticked counts: unresolved, no fix
@@ -2144,9 +2144,11 @@ export const ReviewMode = {
   },
   // Nothing is typed into an agent's session without this preview: who gets it, the reviewer's own words apart, the
   // exact text (editable). go(text, cx): what "Send to agent" does with the confirmed text (default: deliver it).
-  previewSend(cx, { what, own, prompt, onSent, go, ownLabel = "YOUR COMMENT", ask = null }) {
+  // guard: the text holds someone else's GitHub comment (threads.js foreignComment): it goes to a new agent tab in
+  // manual mode, never into a running session (main.js deliver).
+  previewSend(cx, { what, own, prompt, onSent, go, ownLabel = "YOUR COMMENT", ask = null, guard = false }) {
     const { agent, label } = this.sendAgent();
-    this.sendP = { ...TH.preview({ what, agent: label, own, prompt }), onSent, go, ownLabel, ask, address: agent?.address ?? null };
+    this.sendP = { ...TH.preview({ what, agent: label, own, prompt }), onSent, go, ownLabel, ask, guard, address: agent?.address ?? null };
     this.sendText.set_value(prompt); this.finishOpen = false;
     cx.notify();
   },
@@ -2159,7 +2161,7 @@ export const ReviewMode = {
     if (p.fix?.target === "sub") return this.startSubFix(p, out.text, cx);
     if (p.verify) return this.startVerify(p, out.text, cx);
     if (p.go) p.go(out.text, cx);
-    else this.deliver(out.text, cx, out.what, (cx) => p.onSent?.(cx));
+    else this.deliver(out.text, cx, out.what, (cx) => p.onSent?.(cx), Boolean(p.guard));
     cx.notify();
   },
 
@@ -2168,7 +2170,7 @@ export const ReviewMode = {
     const th = this.threads().find((t) => t.id === this.replyTo), text = this.replyIn.value().trim();
     if (!th || !text) return;
     const replies = this.replies[th.id] ?? [], key = this.threadKey();
-    this.previewSend(cx, { what: "Reply", own: text, prompt: TH.followupPrompt({ pr: this.pr, thread: th, replies, text, file: this.repliesFile(), lang: this.lang() }),
+    this.previewSend(cx, { what: "Reply", own: text, guard: TH.foreignComment(th, shared("gh.login")), prompt: TH.followupPrompt({ pr: this.pr, thread: th, replies, text, file: this.repliesFile(), lang: this.lang(), login: shared("gh.login") }),
       onSent: (cx) => { this.updateThreads(cx, (d) => TH.addFollowup(d, key, th.id, text, replies.length)); this.replyIn.set_value(""); this.replyTo = null; } });
   },
   // A thread's buttons, left to right (clicks placed by x in onItem): Reply, the agent's last commit, GitHub, fold.
@@ -2212,8 +2214,10 @@ export const ReviewMode = {
   // What a fix of these comments needs for its preview and after it was sent (fixComments, fixTogether).
   commentFix(ids) {
     const comments = this.commentsById(ids), said = (c) => `${c.by ? `@${c.by} on GitHub · ` : ""}${c.file} ${uiLine(c)}: ${c.text}`;
-    return { comments, items: comments.map((c) => ({ kind: "comment", id: c.id })), labels: comments.map(said),
-      prompt: (sub, lang = this.lang()) => TH.fixCommentsPrompt({ pr: this.pr, comments, file: this.repliesFile(), lang, ...sub }),
+    // foreign: one of them is a GitHub comment by someone else (threads.js foreignComment): its fix never runs
+    // unattended and never in the PR's own session, whatever the PR's trust (previewFix, startSubFix, mainOffered).
+    return { comments, items: comments.map((c) => ({ kind: "comment", id: c.id })), labels: comments.map(said), foreign: TH.hasForeign(comments, shared("gh.login")),
+      prompt: (sub, lang = this.lang()) => TH.fixCommentsPrompt({ pr: this.pr, comments, file: this.repliesFile(), lang, login: shared("gh.login"), ...sub }),
       sent: (cx, how) => {
         const key = this.threadKey(), pending = TH.withIds(this.comments).filter((c) => ids.includes(c.id)), had = new Set(this.threads().map((t) => t.id));
         if (pending.length) { this.comments = TH.withIds(this.comments).filter((c) => !ids.includes(c.id)); this.persist(cx); }
@@ -2226,11 +2230,11 @@ export const ReviewMode = {
   fixComments(ids, cx) {
     const f = this.commentFix(ids), n = f.comments.length;
     if (!n) return;
-    this.previewFix(cx, { what: "Fix with agent", ownLabel: `${f.comments.some((c) => c.from === "github") ? "" : "YOUR "}COMMENT${n === 1 ? "" : "S"}`, own: f.labels.join("\n\n"), items: f.items, prompt: (sub) => f.prompt(sub), labels: f.labels, sent: f.sent });
+    this.previewFix(cx, { what: "Fix with agent", ownLabel: `${f.comments.some((c) => c.from === "github") ? "" : "YOUR "}COMMENT${n === 1 ? "" : "S"}`, own: f.labels.join("\n\n"), items: f.items, prompt: (sub) => f.prompt(sub), labels: f.labels, sent: f.sent, foreign: f.foreign });
   },
   // The preview with the target choice; prompt(sub) gives the text for a sub-agent (sub: {branch, path, head}: its
   // worktree and the PR head it starts from) or, with null, for the main agent.
-  previewFix(cx, { what, own, ownLabel, items, labels, prompt, sent, pool = null, alone = 0, target = null }) {
+  previewFix(cx, { what, own, ownLabel, items, labels, prompt, sent, pool = null, alone = 0, target = null, foreign = false }) {
     const ids = items.map((x) => x.id), branch = TH.fixBranch(this.prSel?.number, ids), repo = this.prSel?.repo, base = this.fixBase();
     cx.spawn(async (cx) => {
       const path = TH.fixPath(await this.wtDir(), repo, branch);
@@ -2242,13 +2246,14 @@ export const ReviewMode = {
         this.updateThreads(cx, (d) => TH.addFix(d, this.threadKey(), job));
         sent(cx, { route: "agent", agent: label });
       } });
-      this.sendP.fix = { target: "sub", ...sub, items, labels, prompt, sent, pool, alone };
+      this.sendP.fix = { target: "sub", ...sub, items, labels, prompt, sent, pool, alone, foreign };
       if (target) this.fixTarget(target);
     });
   },
   // "Main agent" is a choice only when the PR has a live agent session and the PR is trusted: someone else's PR is
-  // fixed in a separate checkout, never in a session with its own rights.
-  mainOffered() { return Boolean(this.sendAgent().agent) && this.trustedPr(); },
+  // fixed in a separate checkout, never in a session with its own rights. Nor is a task that holds someone else's
+  // GitHub comment (sendP.fix.foreign): that session's permissions are its own, and the text is a stranger's.
+  mainOffered() { return Boolean(this.sendAgent().agent) && this.trustedPr() && !this.sendP?.fix?.foreign; },
   // The target switch in the preview: the text follows (a sub-agent gets its worktree note).
   fixTarget(target) {
     const f = this.sendP?.fix;
@@ -2277,7 +2282,7 @@ export const ReviewMode = {
       try {
         const lock = await this.pushLock(base), { git, head } = await this.addWorktree(base, f);
         const id = Date.now().toString(36), { agent } = this.sendAgent();
-        const r = await hc(TH.subAgentArgs({ parent: agent?.address ?? null, cwd: f.path, name: `fix-${id}`, env: this.ctxEnv(this.ctxId()), task: text, job: id, auto: trusted, model: model(), lock }));
+        const r = await hc(TH.subAgentArgs({ parent: agent?.address ?? null, cwd: f.path, name: `fix-${id}`, env: this.ctxEnv(this.ctxId()), task: text, job: id, auto: trusted && !f.foreign, model: model(), lock })); // someone else's GitHub comment in the task: never auto mode
         if (r.code !== 0) { await git(["worktree", "remove", "--force", f.path]); await git(["branch", "-D", f.branch]); throw new Error((r.stderr || r.stdout).trim().slice(0, 200)); }
         const terminal = JSON.parse(r.stdout).address;
         this.updateThreads(cx, (d) => TH.addFix(d, key, { id, branch: f.branch, path: f.path, base, head, items: f.items, terminal, target: "sub", at: Date.now(), state: "running" }));
@@ -2837,7 +2842,7 @@ export const ReviewMode = {
   sendPopover(t) {
     const p = this.sendP, fix = p.fix, sub = fix?.target === "sub", kind = fix ? fix.target : p.verify ? "verify" : p.ask?.kind ?? null, short = (x) => (x ? String(x).replace(home(), "~") : null);
     const live = this.sendAgent().agent, name = live ? p.agent.split(" · ")[0] : null;
-    const facts = kind ? TH.sendFacts({ kind, account: accountOf(this.ctxId()), trusted: this.trustedPr(), branch: fix?.branch ?? p.verify?.branch, name: p.ask?.name ?? name, chat: p.ask?.chat, where: short(p.ask?.where), model: modelLabel(model()), estimate: kind === "sub" ? fixEstimate(tierOf(model())) : null }) : [];
+    const facts = kind ? TH.sendFacts({ kind, account: accountOf(this.ctxId()), trusted: this.trustedPr(), foreign: Boolean(fix?.foreign), branch: fix?.branch ?? p.verify?.branch, name: p.ask?.name ?? name, chat: p.ask?.chat, where: short(p.ask?.where), model: modelLabel(model()), estimate: kind === "sub" ? fixEstimate(tierOf(model())) : null }) : [];
     const picking = Boolean(fix?.pool), n = fix?.items.length ?? 0, some = !picking || n > 0, ready = !this.sending && some, text = this.sendText.value();
     const go = this.sending ? "Sending…" : p.verify ? "Start verify agent" : sub ? (picking && n ? `Start fix agent for ${n} ${n === 1 ? "finding" : "findings"}` : "Start fix agent") : fix ? "Send to main agent"
       : p.ask ? { new: "Start agent", resume: "Resume its session", live: p.ask.chat ? "Draft in chat" : "Paste to agent" }[p.ask.kind] : "Send to agent";
@@ -2859,6 +2864,8 @@ export const ReviewMode = {
           .child(div().flex_none().text_size(TYPE.small).text_color(t.muted).child(`${f.file.split("/").pop()}:${f.line}`)))))
         .when(fix.alone > 0, (x) => x.child(div().text_size(TYPE.small).line_height(1.45).text_color(t.muted).whitespace_normal()
           .child(`${fix.alone} security ${fix.alone === 1 ? "finding is" : "findings are"} not in this list. Each is fixed on its own, so that its change stays one commit to check.`)))))
+      .when(Boolean(fix?.foreign || p.guard), (e) => e.child(div().id("rv-send-foreign").p(8).rounded(6).border_l(3).border_color(t.ansi3).bg(t.ansi3 + "14").text_size(TYPE.small).line_height(1.45).whitespace_normal()
+        .child(p.guard ? `${TH.FOREIGN_NOTE} It does not go into a running session: a new agent tab gets it.` : TH.FOREIGN_NOTE)))
       .when(!picking && Boolean(p.own), (e) => e.child(v_flex().gap(4).child(head(p.ownLabel))
         .child(div().max_h(110).overflow_hidden().p(8).rounded(6).border_l(3).border_color(t.accent).bg(t.surface).text_size(TYPE.small).line_height(1.45).whitespace_normal().child(p.own))))
       .when(Boolean(fix) && some, (e) => e.child(v_flex().gap(1).child(head("WHO FIXES IT"))
