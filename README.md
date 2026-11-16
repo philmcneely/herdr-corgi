@@ -1,6 +1,6 @@
 <p align="center"><img src="docs/brand/corgi-logo-256.png" width="180" alt="Corgi" /></p>
 
-<h3 align="center">Five Herdr mods that work alone and click together when you install more than one</h3>
+<h3 align="center">Seven Herdr mods that work alone and click together when you install more than one</h3>
 
 <p align="center">One <a href="https://herdr.dev">Herdr</a> window for coding agents, with pull request review the way you'd want it: the change as layers ordered by risk, an architecture map, a security blast radius, state diagrams and sample values in the diff, then GitHub-style comments. Find anything already open with ⌘⇧P, answer waiting agents from a chat bar, dictate, and track your work time. Each part is a mod that works alone; Corgi updates them safely and keeps your edits.</p>
 
