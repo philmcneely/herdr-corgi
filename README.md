@@ -45,6 +45,10 @@ Each mod works on its own. Install more than one and they start helping each oth
 - **PR review + Chat bar:** "Discuss in chat" on a finding opens the agent's bubble, so you follow its answer
   without leaving the review.
 - **Chat bar + Dictate:** a mic in every bubble. Say your reply and edit it before you send it.
+- **Worktrees + Go to:** a checkout with commits that are only on this machine is a row in Go to, also when no space
+  is open on it.
+- **Worktrees + PR review:** a branch that has a pull request carries its mark in the Worktrees panel, and a click
+  on the mark opens that PR in the review panel.
 - **Separate setups, like work and personal:** one small mod of your own tells all of them which space belongs
   where. Go to switches before it jumps, the chat bar tags each agent, and the time tracker counts only work.
 
