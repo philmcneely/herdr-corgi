@@ -90,6 +90,8 @@ printf '{ "state": "windowed", "bounds": [1800.0, 900.0, 1280.0, 760.0] }\n' > "
 printf '{ "last_run": "%s", "presented": [] }\n' "$(herdr-app --version | grep -o '[0-9][0-9.]*' | head -1)" > "$app/update-notes.json"
 printf '{ "roots": ["~/code"], "depth": 2 }\n' > "$app/goto.config.json"
 printf '{ "cloneRoot": "%s", "language": "English", "dryRun": true }\n' "$user/code" > "$app/pr-review.config.json"
+# One file for every mod with editor links: "Open in <Editor>" starts nothing in this home.
+echo "demo: no editor is started" > "$app/editor.dry-run"
 printf '{ "excel_dir": "%s" }\n' "$user/Documents/Timesheets" > "$app/timetrack.config.json"
 printf '{ "maxSeconds": 30 }\n' > "$app/dictate.config.json"
 
