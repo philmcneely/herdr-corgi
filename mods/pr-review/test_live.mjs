@@ -38,6 +38,20 @@ L.feed(); assert.equal(L.spaces()[0].id, "s2", "the next frame of the feeding co
 S.layout = tree([null]);
 assert.deepEqual(reads(() => L.spaces())[1].spaces, 1, "without a feeding copy in the layout Herdr is asked");
 S.layout = tree(["bar"]);
+{ // fresh: data kept from an earlier frame (a space made since, back from the review) is not taken as it is
+  const timers = [], cx = { timer: { after: (_ms, f) => timers.push(f) } };
+  S.spaces = [{ id: "s2" }, { id: "s3" }];
+  assert.equal(L.feedIfAsked(), false, "nobody asked: the feeding copy's timer reads nothing");
+  let woke = 0; const w = L.whenFed(cx, true).then(() => { woke++; });
+  await Promise.resolve(); assert.equal(woke, 0, "it waits for a read from now on");
+  L.feedIfAsked(); await w; assert.deepEqual(L.spaces().map((s) => s.id), ["s2", "s3"], "the feeding copy's timer read for it");
+  assert.equal(L.feedIfAsked(), false, "once");
+  // no feed within the wait: what is kept, and Herdr is still not asked (asked once, the reader is drawn on every change)
+  S.spaces = [{ id: "s4" }]; timers.length = 0; const w2 = L.whenFed(cx, true); timers.forEach((f) => f()); await w2;
+  const [got, asked] = reads(() => L.spaces());
+  assert.deepEqual([got.map((s) => s.id), asked.spaces ?? 0], [["s2", "s3"], 0], "kept after the wait, not asked");
+  L.feed();
+}
 // A watched terminal: feed() says when its state is another one.
 L.watch(["t1", "t9"]);
 assert.equal(L.feed(), true, "a new watch list is a change");

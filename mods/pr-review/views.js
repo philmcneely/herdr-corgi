@@ -1464,6 +1464,18 @@ export function panelShown(node, mod = "pr-review") {
   return walk(node, true);
 }
 
+// The minimized chip's own layout row (props hideEmpty: its block's id): the height to set it to, or null when it has
+// that one already. Empty, it goes to 0 px rather than hidden: a hidden block's copy does not start when its layout
+// does and draws no frame, so it could not come back by itself and would feed nothing to live.js. It comes back with
+// `px` only from 0, so a height the person dragged it to stays.
+export function miniRowPx(tree, id, shown, px = 36) {
+  const find = (n) => (!n || typeof n !== "object" ? null : n.id === id ? n : (n.children ?? []).reduce((hit, c) => hit ?? find(c), null));
+  const node = find(tree);
+  if (!node) return null;
+  const empty = node.size?.px === 0;
+  return shown ? (empty ? px : null) : (empty ? null : 0);
+}
+
 // ---- Resilience: dependencies that fail or are overloaded (pr.js downstreamOf), a compact row each. The decided cases
 // as words with their mark ("slow: waits up to 7 s of the 10 s request ✗"; ✓ handled, ~ partly, ✗ not handled; text, and
 // words and mark apart so only the mark takes a colour), each

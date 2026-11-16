@@ -12,7 +12,7 @@
 // layout they ask Herdr as before.
 import { spaces as spaces0, panes as panes0, agents as agents0, terminals as terminals0, layout } from "herdr";
 
-const FED = { at: 0, direct: false, waiting: [], spaces: [], panes: [], agents: [], terminals: [], watch: [], sig: "" };
+const FED = { at: 0, direct: false, asked: false, waiting: [], spaces: [], panes: [], agents: [], terminals: [], watch: [], sig: "" };
 const MOD = (() => { try { return new URL(import.meta.url).pathname.split("/").slice(-2)[0] || "pr-review"; } catch { return "pr-review"; } })();
 export const FEEDERS = ["mini", "bar"]; // the parts whose frame calls feed()
 
@@ -37,10 +37,18 @@ export const agents = () => (kept() ? FED.agents : agents0());
 export const terminals = () => (kept() ? FED.terminals : terminals0());
 // For a task that needs the data right after the mod started: until the feeding copy drew its first frame, at most
 // 2 s (then Herdr is asked from here on: a layout whose feeding copy never draws).
-export function whenFed(cx) {
-  if (FED.at || !kept()) return Promise.resolve();
+// fresh: data read from now on. What is kept may be older than what Herdr has: a feeding copy reads in its frames, and
+// a frame does not always come (right after a layout switch, back from the review, the new layout's copy has not drawn
+// yet; a window in the background draws none), so the kept spaces can lack a space or tab made meanwhile ("No pane or
+// agent of this space…" for the space shown). The feeding copy's timer reads for it (feedIfAsked); no feed within 2 s:
+// what is kept.
+export function whenFed(cx, fresh = false) {
+  if (!kept() || (FED.at && !fresh)) return Promise.resolve();
+  if (fresh) FED.asked = true;
   return new Promise((done) => { FED.waiting.push(done); cx.timer.after(2000, () => { if (!FED.at) FED.direct = true; done(); }); });
 }
+// In a feeding copy's timer (every 500 ms): feed() when a reader asked for data from now on. Its answer as feed()'s.
+export const feedIfAsked = () => (FED.asked ? feed() : false);
 
 // The terminals a big copy shows the state of (a fix's agent, a check, a probe): feed() says when one of them changed.
 export function watch(addresses) { FED.watch = [...new Set(addresses)].sort(); }
@@ -48,7 +56,7 @@ export const watchSig = (addresses, agentList, terminalList) => addresses.map((a
 // In the frame of a small copy: reads the four and keeps them. True when a watched terminal's status or state is
 // another one than at the last call (the caller then makes the big copy draw, with one shared write).
 export function feed() {
-  FED.spaces = spaces0(); FED.panes = panes0(); FED.agents = agents0(); FED.terminals = terminals0(); FED.at = Date.now(); FED.direct = false;
+  FED.spaces = spaces0(); FED.panes = panes0(); FED.agents = agents0(); FED.terminals = terminals0(); FED.at = Date.now(); FED.direct = false; FED.asked = false;
   for (const done of FED.waiting.splice(0)) done();
   const sig = watchSig(FED.watch, FED.agents, FED.terminals), changed = sig !== FED.sig;
   FED.sig = sig;

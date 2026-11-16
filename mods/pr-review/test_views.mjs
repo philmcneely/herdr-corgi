@@ -1307,3 +1307,15 @@ assert.ok(textW("Loan status model", 12.5) > textW("Model", 12.5));
     dragPath("/co/r", { path: "/etc/passwd" }), dragPath("/co/r", { path: "../../etc/passwd" }), dragPath("/co/r", null)], [null, null, null, null, null, null]);
   console.log("drag path ok");
 }
+
+// The minimized chip's own row (props hideEmpty): 0 px while nothing is minimized, its height back when something is,
+// one resize per change (null: it has that height), and a height the person dragged it to stays.
+{
+  const { miniRowPx } = await import("./views.js");
+  const tree = (size) => ({ id: "root", type: "row", children: [{ id: "work", type: "column", children: [
+    { id: "main", type: "block", content: { tab: "active" } }, { id: "mini", type: "block", size, content: { mod: "pr-review", props: { part: "mini", hideEmpty: "mini" } } }] }] });
+  assert.deepEqual([miniRowPx(tree({ px: 36 }), "mini", false), miniRowPx(tree({ px: 0 }), "mini", false)], [0, null], "empty: to 0 px, once");
+  assert.deepEqual([miniRowPx(tree({ px: 0 }), "mini", true), miniRowPx(tree({ px: 0 }), "mini", true, 40), miniRowPx(tree({ px: 36 }), "mini", true), miniRowPx(tree({ px: 52 }), "mini", true)], [36, 40, null, null], "minimized: back from 0, a dragged height stays");
+  assert.deepEqual([miniRowPx(tree({ px: 36 }), "other", false), miniRowPx(null, "mini", false)], [null, null], "not in this layout: nothing");
+  console.log("mini row ok");
+}

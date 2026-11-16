@@ -1,6 +1,6 @@
 {
   "name": "pr-review",
-  "version": "0.13.1",
+  "version": "0.13.4",
   "requires": {
     "herdr-app": ">=0.1.16"
   },

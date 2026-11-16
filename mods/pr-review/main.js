@@ -17,7 +17,7 @@
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar, Editor, EditorState, TextView, v_virtual_list, VirtualListScrollHandle } from "gpui-base";
 import { focused, exec, hc, run, theme, settings, readTextFile, writeTextFile, shared, setShared, appHome, home, layout, props, watchFolder, nextCommand, checking } from "herdr";
-import { spaces, panes, agents, terminals, feed, whenFed } from "./live.js"; // never straight from Herdr: one read and this copy is drawn on every agent's status change
+import { spaces, panes, agents, terminals, feed, feedIfAsked, whenFed } from "./live.js"; // never straight from Herdr: one read and this copy is drawn on every agent's status change
 import { diffRows, buildPrompt, splitPatch, selection, nextChange, lineLabel, anchorRow, buildReview, hunksOf, hash, uiLine, reviewRequest, mapReview, triageOf, isSecurity, withThreats, knownOf } from "./pr.js";
 import { parsePrRef, ghTarget, pruneSources, codeModel, windowActive, pollDue, pollAfter, tabName } from "./pr.js";
 import * as C from "./context.js";
@@ -26,7 +26,7 @@ import { loadDiff, saveDiff } from "./diffcache.js";
 import { setupBanner, renderSetup, loadSetup, runSetup, openUrl, readConfig } from "./setup-view.js";
 import { chip, PRIORITY_TIP, layoutPump } from "./stack.js";
 import { panelState, bodyTab, DONE_DAYS, diffTooLarge, filesToDiff, isOpenPr, byState, listRows, riskSignal, progressText, pendingText, rowMarks, mineGroups, progressRows, removedText, withPick, openSig, panelShown, byRef, fileRisk, leftNow, wrapCode, codeCols, sliceSpans, markLabel, textW, panelButtons, panelHit, panelPress, PANEL_EDGE, spaceFolders, headBranch, spaceBranches, branchPrQuery, branchPrs, spaceOrder, focusedPr, spaceEmpty, worktreePrs } from "./views.js";
-import { keepLast, dragPath } from "./views.js"; // every cache has a limit; a file head's path to drag
+import { keepLast, dragPath, miniRowPx } from "./views.js"; // every cache has a limit; a file head's path to drag; the chip's own row
 import { ReviewMode, startReview, startExplore, saveKey, flowCard, modelPills, modelLabel, renderReviews, renderAgentBar, renderKeys, renderCardMenu, renderMini } from "./review.js";
 import { highlightJob, highlightStep, langOf, firstLineOf, colors, renderLine, editorSyntax } from "./syntax.js";
 import { TYPE } from "./views.js"; // the text sizes (U34)
@@ -128,6 +128,7 @@ const pill = (id, t, label, click, on = false, tip = "", alt = "") => div().id(i
 
 // What the Worktrees mod gets (its PROVIDERS.md): the PRs as of now, the contexts they were listed for (view: the
 // chip's copy empties a list of another view), and what a click on a mark runs: the wish to pick that PR here.
+const wtKey = () => `${Boolean(shared("worktrees.api"))}|${viewKey()}`; // what the published list depends on besides the PRs
 const wtList = (prs) => ({ at: Date.now(), view: viewKey(), run: [["pr-review.want:{repo}#{number}", {}]], prs });
 
 export default class PrReview extends View {
@@ -139,6 +140,8 @@ export default class PrReview extends View {
     if (this.part === "mini") this.listen(cx, (c) => { if (c.startsWith("want:")) this.wantPick(c.slice(5)); }, false);
     // A minimized Explore whose run is going: its status file says when it has ended, so the chip can say so.
     if (this.part === "mini") cx.timer.every(5000, (cx) => this.miniPoll(cx));
+    // The small copies read Herdr's live data in their frames; asked for data from now on (live.js whenFed), also between.
+    if (this.part === "mini" || this.part === "bar") cx.timer.every(500, () => { if (feedIfAsked()) setShared("review.watched", Date.now()); });
     if (this.part === "bar" || this.part === "reviews" || this.part === "agentbar" || this.part === "keys" || this.part === "cmenu" || this.part === "mini") return;
     this.announces = true; // Go to's keys: published while this copy runs, cleared in close()
     this.files = []; this.rows = []; this.sel = null; this.selEnd = null; this.question = "";
@@ -197,6 +200,9 @@ export default class PrReview extends View {
       this.scanIfDue(cx);
     });
     cx.timer.every(60000, (cx) => this.scanIfDue(cx)); // a time check; prs.py itself at most every PRS_MS
+    // The same check as in render, for a panel not drawn (behind another panel of its stack, a hidden column): Worktrees
+    // started there meanwhile, or the view changed and the chip emptied the list, and its PR marks come without a frame.
+    cx.timer.every(2000, () => this.wtCheck());
   }
 
   // A key command or scripted click for the panel (pr-review.<c>).
@@ -853,7 +859,7 @@ export default class PrReview extends View {
     let key, fetch, why = null;
     if (now === "space") {
       // Local only: the folders of the space's panes and agents, their repos (remembered) and HEAD files.
-      await whenFed(cx); // right after a start the chip may not have read the spaces yet (live.js)
+      await whenFed(cx, true); // what the chip read before may be older than this space or its tabs (live.js)
       const found = (await Promise.all(spaceFolders(space, spaces(), panes(), terminals()).map((cwd) => this.checkout(cwd)))).filter(Boolean), repos = spaceBranches(found);
       if (stale()) return;
       this.spaceHeads = new Map(found.map((c) => [c.cwd, c]));
@@ -941,6 +947,8 @@ export default class PrReview extends View {
   // Optional Worktrees (its PROVIDERS.md) integration: which PR belongs to which branch, from what the panel already
   // has (no fetch, no timer). Only with that mod there (shared "worktrees.api"), and written only when the list
   // changed: a shared write redraws every mod of the window. A click on a mark there picks the PR here.
+  // Worktrees came (or went), or the view shows other contexts: the list again (written only when it differs).
+  wtCheck() { const wk = wtKey(); if (wk !== this.wtKey) { this.wtKey = wk; this.wtSig = null; this.publishWorktrees(); } }
   publishWorktrees() {
     if (this.part || !shared("worktrees.api")) return;
     const prs = worktreePrs([this.knownPrs()]), sig = JSON.stringify(prs);
@@ -1455,6 +1463,13 @@ export default class PrReview extends View {
           this.toReview(r ? r.target ?? r : { url: ref.url, repo: ref.repo, number: Number(ref.number), source: "open" });
         });
       }
+      // props hideEmpty: "<its block's id>": the row goes to 0 px while nothing is minimized and back when something is
+      // (views.js miniRowPx says why not hidden). One resize per change, after this frame; the next frame's layout has it.
+      const own = props()?.hideEmpty, rowPx = () => { const m = shared("review.minimized"); return miniRowPx(layout(), own, Boolean(m?.target || m?.explore), Number(props()?.height) || 36); };
+      if (own && !this.rowQueued && rowPx() !== null) {
+        this.rowQueued = true;
+        cx.timer.after(0, () => { this.rowQueued = false; const px = rowPx(); if (px !== null) run("layout.resize", { id: own, px }); });
+      }
       return renderMini(this.miniRun ?? null);
     }
     if (this.part === "review") {
@@ -1481,7 +1496,7 @@ export default class PrReview extends View {
     // shared() hands out a new object each time: compared by what the items are made of (views.js openSig), not by identity.
     if (openSig(shared("review.open")) !== this.gotoSig) { this.gotoSig = openSig(shared("review.open")); cx.timer.after(0, () => this.publishGoto()); }
     // Worktrees came (or went), or the view shows other contexts: its list again (written only when it differs).
-    { const wk = `${Boolean(shared("worktrees.api"))}|${viewKey()}`; if (wk !== this.wtKey) { this.wtKey = wk; this.wtSig = null; cx.timer.after(0, () => this.publishWorktrees()); } }
+    if (wtKey() !== this.wtKey) cx.timer.after(0, () => this.wtCheck());
     // A PR asked for by a click elsewhere (wantPick), also one from before this panel was there.
     if (shared("pr.pick") && !this.pickQueued) { this.pickQueued = true; cx.timer.after(0, (cx) => { this.pickQueued = false; this.takePick(cx); }); }
     if (this.spaceSeen !== undefined && location().space !== this.spaceSeen) { this.spaceSeen = location().space; cx.timer.after(0, (cx) => this.onSpace(cx)); }

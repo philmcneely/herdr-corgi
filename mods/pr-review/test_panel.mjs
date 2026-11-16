@@ -476,6 +476,15 @@ S.files.set("/h/pr-data/prs.json", JSON.stringify({ generated: new Date().toISOS
   const wl = S.store.get("worktrees.prs.review");
   assert.deepEqual([n.writes, wl.prs, wl.view, wl.at > 1], [["worktrees.prs.review"], [], "all", true], "a list of another view is emptied with a new time, once");
   S.props = {};
+  // Worktrees starts while the panel is not drawn (behind another panel of its stack): the panel's timer publishes, no
+  // frame needed; the same check again writes nothing.
+  for (const k of ["worktrees.api", "worktrees.providers", "worktrees.prs.review"]) Map.prototype.set.call(S.store, k, null);
+  const checks = [], cx2 = { ...cx, timer: { ...cx.timer, every(ms, fn) { if (ms === 2000) checks.push(fn); } } };
+  const behind = new PrReview(); behind.init({}, cx2); await flush();
+  assert.deepEqual([checks.length, S.store.get("worktrees.prs.review")], [1, null], "no Worktrees yet: nothing written");
+  Map.prototype.set.call(S.store, "worktrees.api", { version: 1 }); reset(); checks.forEach((f) => f(cx2));
+  assert.ok(n.writes.includes("worktrees.prs.review") && S.store.get("worktrees.prs.review").prs.some((x) => x.number === 8), "Worktrees appeared: the list is written without a frame");
+  reset(); checks.forEach((f) => f(cx2)); assert.deepEqual(n.writes, [], "checked again: nothing written");
 }
 // ---- the minimized Explore chip learns that its run has ended (its status file), and reads nothing without a run
 {

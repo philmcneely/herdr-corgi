@@ -214,6 +214,17 @@ globalThis.__rv.store.set("review.minimized", null);
 renderMini();
 globalThis.__rv.store.set("review.minimized", { target: { url: "https://github.com/o/r/pull/7", number: 7, title: "feat: x", repo: "o/r" }, at: 1 });
 renderMini();
+// As a float it is content only: Herdr draws the frame around a float, so the chip draws no border and no ground of
+// its own (two frames, one in the other, otherwise), and it is 20 px high. In a block of a layout it keeps its own
+// frame. Its security mark is plain text in both: no dashed box, no "?".
+{ const drawn = (placement) => { S.placement = placement; S.calls = []; S.texts = new Set(); renderMini(); const got = { calls: S.calls, texts: [...S.texts] }; S.calls = S.texts = null; S.placement = null; return got; };
+  S.store.set("review.open", [{ url: "https://github.com/o/r/pull/7", risk: { top: "high", security: true, form: "open", words: "1 high, assumed reachable" }, progress: { findingsOpen: 12 } }]);
+  const float = drawn({ edge: "top", align: "center", vertical: false, hovered: false, dragging: false }), block = drawn(null), side = drawn({ edge: "left", align: "start", vertical: true });
+  const frame = (g) => [g.calls.filter((k) => k === "border_1").length, g.calls.includes("border_dashed"), g.calls.includes("bg") && g.calls.indexOf("rounded_full") < g.calls.indexOf("id")];
+  assert.deepEqual([frame(float), frame(block), frame(side)], [[0, false, false], [1, false, true], [0, false, false]], "a float: no frame of its own; a block: its own");
+  for (const g of [float, block, side]) assert.ok(g.texts.includes("⛨ high") && g.texts.includes("12 unresolved") && g.texts.includes("Resume") && !g.texts.some((x) => x.includes("?")), g.texts.join(" | "));
+  assert.ok(float.texts.includes("feat: x") && !side.texts.includes("feat: x"), "on a side edge the title is in the tooltip only");
+  S.store.set("review.open", null); }
 globalThis.__rv.store.set("review.minimized", null);
 console.log("render ok");
 

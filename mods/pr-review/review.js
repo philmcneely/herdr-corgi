@@ -11,7 +11,7 @@
 // submit popover: one GitHub review (gh api) or, for a PR with an agent session, the prompt to that session.
 import { div } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, TextView, v_virtual_list, VirtualListScrollHandle, ScrollHandle, Textarea, TextareaState, Input, InputState, HoverCard } from "gpui-base";
-import { exec, hc, run, focused, pickFolder, theme, settings, readTextFile, writeTextFile, shared, setShared, appHome, nextCommand, watchFolder, openOverlay, closeOverlay, props, home } from "herdr";
+import { exec, hc, run, focused, pickFolder, theme, settings, readTextFile, writeTextFile, shared, setShared, appHome, nextCommand, watchFolder, openOverlay, closeOverlay, props, home, placement } from "herdr";
 import { spaces, agents, terminals, watch } from "./live.js"; // never straight from Herdr (live.js says why)
 import { parseReports, findingStatus, mergeFindings, findingCounts, countLine, runsOf, fixPrompt, hash, touchReview, expireReviews, resumeFields, itemKeys, expandTabs, tokenAt } from "./pr.js";
 import * as C from "./context.js";
@@ -36,7 +36,7 @@ import { ghMd, mdBlocks } from "./views.js"; // GitHub comments as GitHub shows 
 import { wrapCode, codeCols, sliceSpans } from "./views.js"; // long lines wrap
 import { rowMarks, riskOfCounts, placeOf, patchSymlink } from "./views.js"; // the minimized chip's mark, from the registry entry; a card's place
 import { editorFor, editorMark, editorLink, editorCommand, openEditorMenu, editorFull, editorMenuTip } from "./editor-view.js"; // "Open in <Editor>"
-import { pageBadge, signOf, signEl, markLabel } from "./views.js"; // one sign for severity and certainty: nav rows, the bar, rows, chips
+import { pageBadge, signOf, signEl } from "./views.js"; // one sign for severity and certainty: nav rows, the bar, rows, chips
 import { pairRows, pairSide, HALF_GUTTER, diffModeOf, oneSided, stackOf, chipAt, textW } from "./views.js"; // side by side; the bar's stack
 import { mdTarget, secPicture, secBlast, resNoPicture } from "./views.js"; // Copy as Markdown: what it copies on each page; the Security page's picture and lines
 const MD_W = textW("⧉ Copy as Markdown…", TYPE.small) + 22; // the button's width on a layer's head, where clicks are placed by x
@@ -320,27 +320,40 @@ const leave = () => { const pr = shared("review.target"); if (pr?.url) setShared
 // Minimize: back to the previous layout with the review kept as one entry (part "mini", a float in the main layout):
 // Open brings it back where it was, ✕ drops it. One at a time: minimizing another review replaces it.
 const minimize = () => { const pr = shared("review.target"); if (pr) setShared("review.minimized", { target: pr, at: Date.now() }); leave(); };
+// The minimized chip's frame and its two buttons. As a float (Herdr's placement() says where) Herdr draws the frame
+// around it: background, border, rounded corners and shadow, with 5 px above and below. So there the chip is content
+// only, MINI_H high: with Herdr's frame 30 px, which fits a tab bar and stays above a pane's first line of text. A
+// frame of its own inside Herdr's was two frames, one in the other. On a left or right edge its parts stand under
+// each other. Where a layout puts it into a block instead of a float, it draws its own frame, as before.
+const MINI_H = 20;
+function miniShell(t, tip) {
+  const at = placement(), row = at?.vertical ? v_flex().px(8).py(4).gap(4).items_center() : h_flex().h(at ? MINI_H : 28).pl(at ? 8 : 10).pr(at ? 2 : 3).gap(6).items_center();
+  return { vertical: Boolean(at?.vertical), el: (at ? row : row.rounded_full().border_1().border_color(t.border).bg(t.popover)).id("rv-mini")
+    .text_size(TYPE.small).text_color(t.foreground).tooltip(tip).on_mouse_down("left", (_e, cx) => cx.stop_propagation()) }; // a press the mod doesn't stop would drag the float
+}
+const miniButtons = (t, e, { resumeTip, resume, closeTip, closeLabel }) => e
+  .child(div().id("rv-mini-open").px(8).h(MINI_H).flex().items_center().rounded_full().cursor_pointer().text_color(t.accent).hover((x) => x.bg(t.hover)).tooltip(resumeTip).on_click(resume).child("Resume"))
+  .child(div().id("rv-mini-x").w(MINI_H).h(MINI_H).flex().items_center().justify_center().rounded_full().cursor_pointer().text_color(t.muted).hover((x) => x.bg(t.hover))
+    .tooltip(closeTip).accessibility_label(closeLabel).on_click(() => setShared("review.minimized", null)).child("✕"));
 // run: what became of a minimized Explore run ({id, state: "done" | "failed"}; main.js miniPoll reads its status file).
 export function renderMini(run = null) {
   const t = theme(), pr = shared("review.minimized")?.target, ex = shared("review.minimized")?.explore;
   if (ex) return miniExplore(t, ex, run);
   if (!pr) return div();
   const open = (shared("review.open") ?? []).find((r) => r.url === pr.url); // the review's own count, as the panel shows it
-  // A small chip, so it covers little of the terminal under it: the PR number, its full title in the tooltip.
-  return h_flex().id("rv-mini").h(28).pl(10).pr(3).gap(6).items_center().rounded_full().border_1().border_color(t.border).bg(t.popover)
-    .text_size(TYPE.small).text_color(t.foreground).tooltip(`${pr.repo ?? ""}#${pr.number ?? ""} ${pr.title ?? ""}`)
-    .on_mouse_down("left", (_e, cx) => cx.stop_propagation()) // a press the mod doesn't stop would drag the float
+  // A small chip, so it covers little of what is under it: the PR number, its full title in the tooltip.
+  const shell = miniShell(t, `${pr.repo ?? ""}#${pr.number ?? ""} ${pr.title ?? ""}`);
+  return miniButtons(t, shell.el
     .child(div().flex_none().font_semibold().child(`Review #${pr.number ?? ""}`))
-    .when(Boolean(pr.title), (e) => e.child(div().flex_none().max_w(220).truncate().text_color(t.muted).child(pr.title)))
-    // The review's own mark, as its rows carry it: "⛨ high" in red when an unresolved finding is about security.
-    // Its color is the severity's, its form how sure that is (views.js signOf), as on the review's own rows.
+    .when(Boolean(pr.title) && !shell.vertical, (e) => e.child(div().flex_none().max_w(220).truncate().text_color(t.muted).child(pr.title)))
+    // The review's own mark: "⛨ high" in the severity's color when an unresolved finding is about security, as plain
+    // text. How sure it is stands in the tooltip: the dashed box with "⛨?" that says it on the review's rows read as
+    // a broken character in a chip this small.
     .children(rowMarks(open?.risk, null).map((m) => div().id("rv-mini-risk").tooltip(`The highest severity among this review's unresolved findings${m.words ? `: ${m.words}` : ""}`).flex_none().px(5).rounded(4).text_size(TYPE.small)
-      .text_color(t[m.color] ?? t.muted).bg((t[m.color] ?? t.muted) + "26").child(markLabel(div, t, m))))
-    .when(Boolean(open?.progress?.findingsOpen), (e) => e.child(div().flex_none().text_color(t.muted).child(`${open.progress.findingsOpen} unresolved`)))
-    .child(div().id("rv-mini-open").px(8).h(22).flex().items_center().rounded_full().cursor_pointer().text_color(t.accent).hover((x) => x.bg(t.hover))
-      .tooltip("Back to the review, where you left it").on_click(() => startReview(pr)).child("Resume"))
-    .child(div().id("rv-mini-x").w(22).h(22).flex().items_center().justify_center().rounded_full().cursor_pointer().text_color(t.muted).hover((x) => x.bg(t.hover))
-      .tooltip("Remove this chip. The review stays in progress with its comments; the panel's In progress resumes it.").accessibility_label("Remove the minimized review's chip").on_click(() => setShared("review.minimized", null)).child("✕"));
+      .text_color(t[m.color] ?? t.muted).bg((t[m.color] ?? t.muted) + "26").child(m.text)))
+    .when(Boolean(open?.progress?.findingsOpen), (e) => e.child(div().flex_none().text_color(t.muted).child(`${open.progress.findingsOpen} unresolved`))),
+    { resumeTip: "Back to the review, where you left it", resume: () => startReview(pr),
+      closeTip: "Remove this chip. The review stays in progress with its comments; the panel's In progress resumes it.", closeLabel: "Remove the minimized review's chip" });
 }
 
 // Explore, minimized: what it is about (the topic, else "Explore: <repo>"), a run that is going or has ended meanwhile,
@@ -353,18 +366,14 @@ export const miniExploreText = (ex, run = null, now = Date.now()) => {
     text: !ex.busy ? (ex.err ? "the run failed" : "") : ended === "done" ? "the walkthrough is ready" : ended === "failed" ? "the run failed" : `running · ${clock(now - ex.busy.started)}` };
 };
 function miniExplore(t, ex, run) {
-  const m = miniExploreText(ex, run);
-  return h_flex().id("rv-mini").h(28).pl(10).pr(3).gap(6).items_center().rounded_full().border_1().border_color(t.border).bg(t.popover)
-    .text_size(TYPE.small).text_color(t.foreground).tooltip([m.topic || "Explore a topic", m.repo, m.state === "running" ? "The run goes on while this is minimized." : null].filter(Boolean).join("\n"))
-    .on_mouse_down("left", (_e, cx) => cx.stop_propagation()) // a press the mod doesn't stop would drag the float
+  const m = miniExploreText(ex, run), shell = miniShell(t, [m.topic || "Explore a topic", m.repo, m.state === "running" ? "The run goes on while this is minimized." : null].filter(Boolean).join("\n"));
+  return miniButtons(t, shell.el
     .child(div().flex_none().font_semibold().child(m.head))
-    .when(Boolean(m.topic), (e) => e.child(div().flex_none().max_w(260).truncate().text_color(t.muted).child(m.topic)))
+    .when(Boolean(m.topic) && !shell.vertical, (e) => e.child(div().flex_none().max_w(260).truncate().text_color(t.muted).child(m.topic)))
     .when(m.state === "running", (e) => e.child(div().flex_none().text_color(t.muted).child(SPIN[0]).frames(SPIN, 90)))
-    .when(Boolean(m.text), (e) => e.child(div().id("rv-mini-run").flex_none().text_color(m.state === "failed" ? t.ansi1 : m.state === "done" ? t.ansi2 : t.muted).child(m.text)))
-    .child(div().id("rv-mini-open").px(8).h(22).flex().items_center().rounded_full().cursor_pointer().text_color(t.accent).hover((x) => x.bg(t.hover))
-      .tooltip("Back to Explore: the topic, the run and its result as you left them").on_click(() => startExplore(ex.root ?? null, ex)).child("Resume"))
-    .child(div().id("rv-mini-x").w(22).h(22).flex().items_center().justify_center().rounded_full().cursor_pointer().text_color(t.muted).hover((x) => x.bg(t.hover))
-      .tooltip("Remove this chip. A run that is going finishes anyway; its walkthrough is then listed under Explorations.").accessibility_label("Remove the minimized Explore chip").on_click(() => setShared("review.minimized", null)).child("✕"));
+    .when(Boolean(m.text), (e) => e.child(div().id("rv-mini-run").flex_none().text_color(m.state === "failed" ? t.ansi1 : m.state === "done" ? t.ansi2 : t.muted).child(m.text))),
+    { resumeTip: "Back to Explore: the topic, the run and its result as you left them", resume: () => startExplore(ex.root ?? null, ex),
+      closeTip: "Remove this chip. A run that is going finishes anyway; its walkthrough is then listed under Explorations.", closeLabel: "Remove the minimized Explore chip" });
 }
 
 const pill = (id, t, label, click, on = false, color) => div().id(id).flex_none().whitespace_nowrap().px(9).h(26).flex().items_center().rounded(6).border_1()
@@ -2952,7 +2961,9 @@ export const ReviewMode = {
     // its own (the talk with the agent), not a finding's: "Fixed" is a finding's word, after a verification.
     const all = this.commentRowsNow(), rows = TH.filterRows(all, "all", this.show()), sel = new Set(this.selected());
     const STATE = { pending: ["Pending", "ansi3"], waiting: ["Sent to agent", "ansi6"], replied: ["Agent replied", "accent"], fixed: ["Reported fixed", "ansi2"], declined: ["Declined", "muted"], github: ["GitHub", "ansi4"], note: ["Note", "ansi5"] };
-    const files = [...new Set(rows.map((r) => r.file))];
+    // "Reported fixed" ones are folded into one line at the end, per PR; ticks on them still count.
+    const fixedOpen = (this.fixedShown ??= new Set()).has(this.threadKey()), done = rows.filter((r) => r.state === "fixed");
+    const listed = (list) => [...new Set(list.map((r) => r.file))];
     return v_flex().flex_1().min_h(0)
       .child(v_flex().flex_none().px(14).py(10).gap(8).border_b(1).border_color(t.border)
         .child(div().text_size(TYPE.small).text_color(t.muted).whitespace_normal().child(TH.commentSummary(all) || "No comments yet")))
@@ -2960,7 +2971,18 @@ export const ReviewMode = {
         .child(v_flex().id("rv-comments-left").absolute().inset_0().overflow_y_scroll().p(8).gap(2)
           .when(!rows.length, (e) => e.child(div().p(6).text_size(TYPE.small).text_color(t.muted).whitespace_normal().child(all.length ? "The Show switch in the bar hides these comments." : "Comments you write, send or post show here, with their replies.")))
           // A file's heading jumps to that file in the diff (its rows jump to their lines).
-          .children(files.flatMap((file) => [div().id(`rv-cfile-${file}`).tooltip("Show this file in the diff").flex_none().pt(8).pb(2).px(6).text_size(TYPE.small).font_semibold().text_color(t.muted).truncate()
+          .children(this.commentGroups(t, rows.filter((r) => r.state !== "fixed"), listed, STATE, sel, ""))
+          .when(done.length > 0, (e) => e.child(h_flex().id("rv-cfixed").flex_none().mt(10).px(6).h(26).gap(6).items_center().rounded(6).cursor_pointer()
+            .text_size(TYPE.small).text_color(t.muted).hover((s) => s.bg(t.hover).text_color(t.foreground))
+            .tooltip(fixedOpen ? "Hide the comments an agent reported fixed" : "Show the comments an agent reported fixed")
+            .on_click((_e, cx) => { const k = this.threadKey(); if (this.fixedShown.has(k)) this.fixedShown.delete(k); else this.fixedShown.add(k); cx.notify(); })
+            .child(`${done.length} reported fixed ${fixedOpen ? "▾" : "▸"}`)))
+          .when(fixedOpen, (e) => e.children(this.commentGroups(t, done, listed, STATE, sel, "f"))))
+        .child(Scrollbar.vertical("rv-comments-left").absolute().inset_0()));
+  },
+  // Rows of the Comments tab under their files' headings. pre keeps the ids of a second group apart.
+  commentGroups(t, rows, listed, STATE, sel, pre) {
+          return listed(rows).flatMap((file) => [div().id(`rv-cfile-${pre}${file}`).tooltip("Show this file in the diff").flex_none().pt(8).pb(2).px(6).text_size(TYPE.small).font_semibold().text_color(t.muted).truncate()
             .cursor_pointer().hover((s) => s.text_color(t.foreground)).on_click((_e, cx) => { this.openCommentFile(file); cx.notify(); }).child(file),
             ...rows.filter((r) => r.file === file).flatMap((r) => {
               const st = STATE[r.state], mine = r.kind !== "note"; // yours, a sent thread, someone's GitHub comment: all can go to a fix; a private note cannot
@@ -2980,8 +3002,7 @@ export const ReviewMode = {
                 .when(Boolean(r.outdated), (e) => e.child(badge(t, "Outdated", t.muted).id(`rv-cro-${r.id}`).tooltip("GitHub marks this comment outdated: the code it was on changed since")))
                 .when(Boolean(r.resolved), (e) => e.child(badge(t, "Resolved", t.ansi2).id(`rv-crv-${r.id}`).tooltip("This thread is resolved on GitHub")))
                 .child(div().id(`rv-crs-${r.id}`).tooltip(STATE_TIP[r.state] ?? st[0]).flex_none().px(6).h(18).flex().items_center().rounded(9).border_1().border_color(t[st[1]] ?? t.muted).text_size(TYPE.small).text_color(t[st[1]] ?? t.muted).child(st[0]))), ...whole];
-            })])))
-        .child(Scrollbar.vertical("rv-comments-left").absolute().inset_0()));
+            })]);
   },
 
   // While comments are selected: a toolbar floating at the bottom centre of the diff (the list keeps room for it).
