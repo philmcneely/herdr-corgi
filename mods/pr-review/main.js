@@ -649,10 +649,13 @@ export default class PrReview extends View {
   // Sends a prompt: a picked PR goes to its session (live agent, else `claude --resume` in a new tab, else a fresh
   // Claude when its folder is gone); the branch diff to this space's agent or a new Claude tab. Sending goes there:
   // the agent's tab is selected, and a new tab takes the focus (Herdr's default) the same way.
-  deliver(prompt, cx, what, done) {
+  // guard: the text holds someone else's words (a GitHub comment by another author, threads.js foreignComment). It
+  // goes into no session that runs with rights of its own (a live agent, the PR's resumed session): a new tab gets
+  // it, in manual mode with the person's own settings only.
+  deliver(prompt, cx, what, done, guard = false) {
     const { space } = location(), origin = this.prSel;
     if (!space || this.sending || !(this.root || this.pr)) return;
-    const ctx = this.ctxId(), agent = origin?.session ? this.sessionAgent(origin) : this.target(origin?.space ?? space);
+    const ctx = this.ctxId(), agent = guard ? null : origin?.session ? this.sessionAgent(origin) : this.target(origin?.space ?? space);
     this.sending = true; this.note = null;
     cx.spawn(async (cx) => {
       try {
@@ -661,13 +664,13 @@ export default class PrReview extends View {
           if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
           run("tab.select", { id: agent.tab });
           this.note = `${what} sent to ${agent.tab_name || "agent"}`;
-        } else if (origin?.session && this.root) {
+        } else if (!guard && origin?.session && this.root) {
           // The session lives in the config folder it ran under (sessionContext), which the rules' context may not be.
           run("tab.new", { space: this.spaceFor(ctx, origin.cwd, this.root), folder: origin.cwd, name: tabName(origin.repo, `PR #${origin.number}`), argv: [...this.ctxEnv(origin.sessionContext ?? ctx), "claude", "--resume", origin.session], task: prompt });
           this.note = `${what}: resumed the PR's session in a new tab`;
         } else {
-          run("tab.new", { space: this.spaceFor(ctx, this.root), folder: this.root ?? location().cwd, name: tabName(origin?.repo ?? this.root, origin ? `PR #${origin.number}` : "review"), argv: tabArgs({ env: this.ctxEnv(ctx), model: walkModel() }), task: prompt });
-          this.note = `${what}: started a new Claude tab`;
+          run("tab.new", { space: this.spaceFor(ctx, this.root), folder: this.root ?? location().cwd, name: tabName(origin?.repo ?? this.root, origin ? `PR #${origin.number}` : "review"), argv: tabArgs({ env: this.ctxEnv(ctx), model: walkModel(), ask: guard, trusted: false }), task: prompt });
+          this.note = `${what}: started a new Claude tab${guard ? " in manual mode (it holds someone else's GitHub comment)" : ""}`;
         }
         done(cx);
       } catch (e) { this.note = `Not sent: ${e}`; }
