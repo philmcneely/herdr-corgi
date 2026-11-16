@@ -52,6 +52,11 @@ Each mod works on its own. Install more than one and they start helping each oth
 - **Separate setups, like work and personal:** one small mod of your own tells all of them which space belongs
   where. Go to switches before it jumps, the chat bar tags each agent, and the time tracker counts only work.
 
+| | | |
+|---|---|---|
+| <img src="docs/screenshots/interplay-goto-review-pr.png" width="260" alt="Go to offers Review PR for a pasted PR link" /> | <img src="docs/screenshots/interplay-goto-reply.png" width="260" alt="Go to lists an agent that waits on you" /> | <img src="docs/screenshots/interplay-discuss.png" width="260" alt="Discuss in chat opens the agent's bubble from a finding" /> |
+| <img src="docs/screenshots/interplay-goto-worktrees.png" width="260" alt="Go to lists a checkout with commits that are only on this machine" /> | <img src="docs/screenshots/interplay-worktrees.png" width="260" alt="The Worktrees panel marks a branch with its pull request" /> | <img src="docs/screenshots/interplay-dictate.png" width="260" alt="A mic in the chat bubble" /> |
+
 Remove a mod and the rest keep working. If you write mods yourself, [CONVENTIONS.md](CONVENTIONS.md) shows how to
 plug into the same places.
 
