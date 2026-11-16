@@ -356,6 +356,26 @@ export function renderMini(run = null) {
       closeTip: "Remove this chip. The review stays in progress with its comments; the panel's In progress resumes it.", closeLabel: "Remove the minimized review's chip" });
 }
 
+// The minimized entry as plain data, for another mod's bar (shared "review.mini", PROVIDERS.md): what the chip shows,
+// without the chip. No clock: a running Explore says "running", so the value changes only when the entry does.
+export function miniModel(min, openList, run = null) {
+  if (min?.explore) {
+    const x = miniExploreText(min.explore, run);
+    return { kind: "explore", head: x.head, title: x.topic || null, repo: x.repo || null, url: null, mark: null, open: 0, run: x.state };
+  }
+  const pr = min?.target;
+  if (!pr) return null;
+  const o = (openList ?? []).find((r) => r.url === pr.url), m = rowMarks(o?.risk, null)[0] ?? null;
+  return { kind: "review", head: `Review #${pr.number ?? ""}`, title: pr.title ?? null, repo: pr.repo ?? null, url: pr.url ?? null,
+    mark: m && { glyph: m.glyph, word: m.word, color: m.color, security: m.security, words: m.words }, open: o?.progress?.findingsOpen || 0, run: null };
+}
+// What the chip's Resume does, for a bar that asks through shared "review.resume".
+export function resumeMini() {
+  const min = shared("review.minimized");
+  if (min?.explore) return startExplore(min.explore.root ?? null, min.explore);
+  if (min?.target) return startReview(min.target);
+}
+
 // Explore, minimized: what it is about (the topic, else "Explore: <repo>"), a run that is going or has ended meanwhile,
 // Resume (the page again with its topic, its run and its result) and ✕.
 export const miniExploreText = (ex, run = null, now = Date.now()) => {

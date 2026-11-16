@@ -60,7 +60,12 @@ setShared("pr-review.contexts", {
 | `review.meta` | `{url, pending, model, busy, error, shown: {model, cost, exact, mergeRisk, effort}}` | the analysis state and the pending comment count, for the bar |
 | `review.layout` | `"review"` or `"pr-review"` | the review layout's name (`"pr-review"` when another layout already had the name `review`) |
 | `review.worktree` | `{url, head, path}` | the checkout of the PR head |
+| `review.mini` | `{kind: "review" \| "explore", head, title, repo, url, mark: {glyph, word, color, security, words} \| null, open, run: "running" \| "done" \| "failed" \| null}` or `null` | the minimized entry as data, for a bar that draws it itself (props `headless`); written by the `mini` part when it changes |
 | `pr-review.setup` | `{at, os, found: {program: path \| null}, auth: {gh, claude}}` | after a Setup check |
+
+**Draw the minimized entry in your own bar**: keep the `mini` part in the layout with props `{"part": "mini", "headless": true}`
+in a block of 0 px (it draws nothing, but takes Go to's `pr.goto` and writes `review.mini`), draw `review.mini`, and
+ask for Resume with `setShared("review.resume", { at: Date.now() })`; `setShared("review.minimized", null)` removes the entry.
 
 **Resume a review from any mod**: `setShared("review.target", entry.target); run("layout.switch", { name: shared("review.layout") ?? "review" })`. The layout is installed into `layouts/` the first time a review is opened from the panel.
 
