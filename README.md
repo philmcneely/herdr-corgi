@@ -2,11 +2,11 @@
 
 <h3 align="center">Seven Herdr mods that work alone and click together when you install more than one</h3>
 
-<p align="center">One <a href="https://herdr.dev">Herdr</a> window for coding agents, with pull request review the way you'd want it: the change as layers ordered by risk, an architecture map, a security blast radius, state diagrams and sample values in the diff, then GitHub-style comments. Find anything already open with ⌘⇧P, answer waiting agents from a chat bar, dictate, and track your work time. Each part is a mod that works alone; Corgi updates them safely and keeps your edits.</p>
+<p align="center">One <a href="https://herdr.dev">Herdr</a> window for coding agents, with pull request review the way you'd want it: the change as layers ordered by risk, an architecture map, security and resilience pages, state diagrams and sample values in the diff, reviewers and fix agents, then GitHub-style comments. Find anything already open with ⌘⇧P, answer waiting agents from a chat bar, see which checkouts hold unpushed work, dictate, and track your work time. Each part is a mod that works alone; Corgi updates them safely and keeps your edits.</p>
 
 <p align="center"><img src="preview.png" width="88%" alt="Corgi: the PR review's architecture impact map, the Go to box finding what's open, and chat bubbles of agents waiting on you" /></p>
 
-<p align="center"><sub>✓&nbsp;Free,&nbsp;MIT&nbsp;licensed &nbsp; ✓&nbsp;Runs&nbsp;locally &nbsp; ✓&nbsp;herdr-app&nbsp;0.1.14+</sub></p>
+<p align="center"><sub>✓&nbsp;Free,&nbsp;MIT&nbsp;licensed &nbsp; ✓&nbsp;Runs&nbsp;locally &nbsp; ✓&nbsp;herdr-app&nbsp;0.1.16+</sub></p>
 
 <br />
 
