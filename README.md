@@ -1,21 +1,36 @@
-<p align="center"><img src="docs/brand/corgi-logo-256.png" width="180" alt="Corgi" /></p>
+<p align="center"><img src="docs/brand/corgi-logo-256.png" width="96" alt="Corgi" /></p>
 
-<h3 align="center">Seven Herdr mods that work alone and click together when you install more than one</h3>
+<h3 align="center">Review agent-written pull requests by their architecture, locally in Herdr</h3>
 
-<p align="center">One <a href="https://herdr.dev">Herdr</a> window for coding agents, with pull request review the way you'd want it: the change as layers ordered by risk, an architecture map, security and resilience pages, state diagrams and sample values in the diff, reviewers and fix agents, then GitHub-style comments. Find anything already open with ⌘⇧P, answer waiting agents from a chat bar, see which checkouts hold unpushed work, dictate, and track your work time. Each part is a mod that works alone; Corgi updates them safely and keeps your edits.</p>
+<p align="center">Corgi's PR review <b>walks you through a pull request by its structure</b>, not line by line. It runs in <a href="https://herdr.dev">Herdr</a>, a desktop app for terminals and coding agents.</p>
 
-<p align="center"><img src="preview.png" width="88%" alt="Corgi: the PR review's architecture impact map, the Go to box finding what's open, and chat bubbles of agents waiting on you" /></p>
+<p align="center"><a href="https://github.com/saefty/herdr-corgi-pr-review"><img src="https://img.shields.io/badge/PR_review-e8590c?style=flat-square" alt="PR review" /></a> <a href="https://github.com/saefty/herdr-corgi-goto"><img src="https://img.shields.io/badge/Go_to-444d56?style=flat-square" alt="Go to" /></a> <a href="https://github.com/saefty/herdr-corgi-chatbar"><img src="https://img.shields.io/badge/Chat_bar-444d56?style=flat-square" alt="Chat bar" /></a> <a href="https://github.com/saefty/herdr-corgi-worktrees"><img src="https://img.shields.io/badge/Worktrees-444d56?style=flat-square" alt="Worktrees" /></a> <a href="https://github.com/saefty/herdr-corgi-dictate"><img src="https://img.shields.io/badge/Dictate-444d56?style=flat-square" alt="Dictate" /></a> <a href="https://github.com/saefty/herdr-corgi-resume"><img src="https://img.shields.io/badge/Resume-444d56?style=flat-square" alt="Resume" /></a> <a href="https://github.com/saefty/herdr-corgi-timetrack"><img src="https://img.shields.io/badge/Time_tracker-444d56?style=flat-square" alt="Time tracker" /></a></p>
+
+<p align="center"><img src="https://github.com/saefty/herdr-corgi-pr-review/raw/main/docs/screenshots/walkthrough.gif" width="88%" alt="Open a PR, read the overview, the layers and the architecture impact, comment under a line, then Finish your review" /></p>
 
 <p align="center"><sub>✓&nbsp;Free,&nbsp;MIT&nbsp;licensed &nbsp; ✓&nbsp;Runs&nbsp;locally &nbsp; ✓&nbsp;herdr-app&nbsp;0.1.16+</sub></p>
 
-<br />
+## How a review goes
+
+1. **Check the shape.** A map of the components the change touches, before and after. A dependency that runs the
+   wrong way stands out before you read any code.
+2. **Read it layer by layer.** Grouped by intent, riskiest first, each layer with what to check and sample values in
+   the diff.
+3. **Check security and resilience.** Where credentials and personal data end up, which permissions grow, and what
+   breaks when a dependency is slow.
+4. **Hand it back.** Your comments go to the agent that wrote the code. Fix agents work in their own worktree, and
+   Verify checks each fix. A colleague's PR gets one GitHub review.
+
+Map, walkthrough and reviewers run on Claude Code, and only when you click. Diff, comments and the views of callers,
+infrastructure and schema changes need no model. Details in the
+[PR review README](https://github.com/saefty/herdr-corgi-pr-review).
 
 ## Install in three steps
 
 <table>
 <tr>
 <td align="center" valign="top" width="33%"><h3>1</h3><b>Clone this repo</b><br /><sub><code>git clone https://github.com/saefty/herdr-corgi</code>, then <code>cd herdr-corgi</code>. You need Python 3 and git.</sub></td>
-<td align="center" valign="top" width="33%"><h3>2</h3><b>Enable the mods</b><br /><sub><code>./corgi.py enable --all --dry-run</code> shows what it would do. <code>./corgi.py enable --all</code> does it, or name the mods you want: <code>./corgi.py enable goto chatbar</code>.</sub></td>
+<td align="center" valign="top" width="33%"><h3>2</h3><b>Enable the mods</b><br /><sub><code>./corgi.py enable --all --dry-run</code> shows what it would do. <code>./corgi.py enable --all</code> does it, or name the mods you want, for the review alone <code>./corgi.py enable pr-review</code>.</sub></td>
 <td align="center" valign="top" width="33%"><h3>3</h3><b>Restart nothing</b><br /><sub>Herdr reloads mods as soon as their files appear. Some need a key or a block in your layout; each mod's README says which.</sub></td>
 </tr>
 </table>
@@ -24,6 +39,9 @@
 `--keys=merge`; otherwise it prints the shortcuts for you to add by hand. A key you already use is never rebound.
 
 ## What's inside
+
+The other mods cover the rest of the window. Each works alone and plugs into the others. Corgi updates them and
+keeps your edits.
 
 | | |
 |---|---|
